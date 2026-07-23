@@ -1,0 +1,178 @@
+# dev/datastores.yaml — LOCAL DEVELOPMENT ONLY (minikube / kind)
+#
+# In-cluster Postgres, Redis, and LocalStack for running the full app on a local
+# cluster. In EKS these are managed services (RDS / ElastiCache / real S3) and
+# these manifests are NOT applied.
+#
+# Service names (postgres / redis / localstack) and ports match the hosts encoded
+# in k8s/base/secret-local.yaml, so the app deployments connect without changes.
+# Storage is ephemeral (emptyDir) — data resets on pod restart, which is fine for
+# a demo (Postgres re-runs its init on a fresh volume).
+#
+#   kubectl apply -f k8s/dev/datastores.yaml
+#
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init
+  namespace: rpd311
+  labels: { app.kubernetes.io/part-of: rpd311, environment: dev }
+data:
+  # reports-service and triage-service each own a database; status-service uses Redis.
+  01-create-databases.sql: |
+    CREATE DATABASE reports;
+    CREATE DATABASE triage;
+    CREATE DATABASE status;
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: rpd311
+  labels: { app: postgres, app.kubernetes.io/part-of: rpd311, environment: dev }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: postgres }
+  template:
+    metadata:
+      labels: { app: postgres }
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:15-alpine
+          env:
+            - { name: POSTGRES_USER, value: rpd311 }
+            - { name: POSTGRES_PASSWORD, value: changeme }
+            # POSTGRES_DB intentionally unset — the init script creates the three DBs.
+          ports:
+            - { name: postgres, containerPort: 5432 }
+          volumeMounts:
+            - { name: init, mountPath: /docker-entrypoint-initdb.d, readOnly: true }
+            - { name: data, mountPath: /var/lib/postgresql/data }
+          readinessProbe:
+            exec: { command: ["pg_isready", "-U", "rpd311"] }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 512Mi }
+      volumes:
+        - name: init
+          configMap: { name: postgres-init }
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: rpd311
+  labels: { app: postgres, app.kubernetes.io/part-of: rpd311 }
+spec:
+  selector: { app: postgres }
+  ports:
+    - { name: postgres, port: 5432, targetPort: postgres }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: rpd311
+  labels: { app: redis, app.kubernetes.io/part-of: rpd311, environment: dev }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: redis }
+  template:
+    metadata:
+      labels: { app: redis }
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          args: ["redis-server", "--save", "", "--appendonly", "no"]
+          ports:
+            - { name: redis, containerPort: 6379 }
+          readinessProbe:
+            exec: { command: ["redis-cli", "ping"] }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: 250m, memory: 256Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: rpd311
+  labels: { app: redis, app.kubernetes.io/part-of: rpd311 }
+spec:
+  selector: { app: redis }
+  ports:
+    - { name: redis, port: 6379, targetPort: redis }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: localstack-init
+  namespace: rpd311
+  labels: { app.kubernetes.io/part-of: rpd311, environment: dev }
+data:
+  create-bucket.sh: |
+    #!/bin/sh
+    awslocal s3 mb "s3://${S3_BUCKET_NAME:-rpd311-attachments}"
+    echo "RPD 311: attachment bucket provisioned. Evidence intake online."
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: localstack
+  namespace: rpd311
+  labels: { app: localstack, app.kubernetes.io/part-of: rpd311, environment: dev }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: localstack }
+  template:
+    metadata:
+      labels: { app: localstack }
+    spec:
+      containers:
+        - name: localstack
+          # Pinned to 3.x community line — free S3, no auth token (see docker-compose.yml).
+          image: localstack/localstack:3
+          env:
+            - { name: SERVICES, value: s3 }
+            - { name: DEFAULT_REGION, value: us-east-1 }
+            - { name: S3_BUCKET_NAME, value: rpd311-attachments }
+          ports:
+            - { name: edge, containerPort: 4566 }
+          volumeMounts:
+            - { name: init, mountPath: /etc/localstack/init/ready.d, readOnly: true }
+          readinessProbe:
+            httpGet: { path: /_localstack/health, port: edge }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 12
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { cpu: 1000m, memory: 1Gi }
+      volumes:
+        - name: init
+          configMap:
+            name: localstack-init
+            defaultMode: 0755
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: localstack
+  namespace: rpd311
+  labels: { app: localstack, app.kubernetes.io/part-of: rpd311 }
+spec:
+  selector: { app: localstack }
+  ports:
+    - { name: edge, port: 4566, targetPort: edge }

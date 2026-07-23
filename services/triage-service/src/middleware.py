@@ -1,9 +1,9 @@
 """Request-scoped middleware: request id + W3C trace propagation.
 
-Reads `traceparent`/`tracestate` from the inbound request and stashes them on
-request.state so every outbound httpx call can forward them. This is what populates
-the Service Graph in Postman API Catalog — without it, triage-service appears as a
-disconnected node even after discovery.
+Derives an outbound `traceparent` for every request (continuing the inbound trace
+or originating a new one) and stashes it on request.state so every outbound httpx
+call forwards it. This is what populates the Service Graph in Postman API Catalog —
+without it, triage-service appears as a disconnected node even after discovery.
 """
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from starlette.requests import Request
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from .config import config
+from .tracing_util import derive_outbound_traceparent
 
 
 class ContextMiddleware(BaseHTTPMiddleware):
@@ -21,12 +22,10 @@ class ContextMiddleware(BaseHTTPMiddleware):
 
         outbound: dict[str, str] = {}
         if config.traceparent_propagation_enabled:
-            traceparent = request.headers.get("traceparent")
-            if traceparent:
-                outbound["traceparent"] = traceparent
-                tracestate = request.headers.get("tracestate")
-                if tracestate:
-                    outbound["tracestate"] = tracestate
+            outbound["traceparent"] = derive_outbound_traceparent(request.headers.get("traceparent"))
+            tracestate = request.headers.get("tracestate")
+            if tracestate:
+                outbound["tracestate"] = tracestate
         request.state.outbound_headers = outbound
 
         response = await call_next(request)

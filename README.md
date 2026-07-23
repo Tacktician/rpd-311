@@ -62,12 +62,6 @@ rpd311/
 │       ├── go.mod
 │       └── openapi.yaml
 │
-├── specs/                                  # convenience copies of all specs
-│   ├── README.md                           # explains canonical locations
-│   ├── reports-service-openapi.yaml
-│   ├── triage-service-openapi.yaml
-│   └── status-service-openapi.yaml
-│
 ├── k8s/
 │   ├── base/
 │   │   ├── namespace.yaml

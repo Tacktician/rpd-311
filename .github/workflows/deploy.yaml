@@ -1,0 +1,84 @@
+name: Deploy (EKS)
+
+# Runs after CI succeeds on main, or manually. The job self-skips unless the
+# repo variable EKS_CLUSTER_NAME is set, so it is inert until you configure EKS.
+#
+# Required repo configuration (Settings → Secrets and variables → Actions → Variables):
+#   AWS_ROLE_ARN       IAM role for GitHub OIDC to assume (also used by CI push)
+#   AWS_REGION         e.g. us-east-1 (optional; defaults to us-east-1)
+#   EKS_CLUSTER_NAME   target EKS cluster name
+# The images deployed are the ones CI pushed to ECR for this commit SHA.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write # AWS OIDC
+
+jobs:
+  deploy:
+    # Manual dispatch always proceeds; workflow_run only on a green CI. Both require EKS to be configured.
+    if: >-
+      ${{ vars.EKS_CLUSTER_NAME != '' &&
+          (github.event_name == 'workflow_dispatch' ||
+           github.event.workflow_run.conclusion == 'success') }}
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      NAMESPACE: rpd311
+      DEPLOY_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name "${{ vars.EKS_CLUSTER_NAME }}" --region "${{ vars.AWS_REGION || 'us-east-1' }}"
+
+      - name: Apply base manifests
+        run: |
+          kubectl apply -f k8s/base/namespace.yaml
+          kubectl apply -f k8s/base/configmap-common.yaml
+          # EKS pulls secrets from AWS Secrets Manager via the External Secrets Operator.
+          kubectl apply -f k8s/base/external-secret-eso.yaml
+          kubectl -n "$NAMESPACE" rollout status --timeout=60s deployment/reports-service 2>/dev/null || true
+
+      - name: Apply service + ingress manifests
+        run: |
+          kubectl apply -f k8s/reports-service/
+          kubectl apply -f k8s/triage-service/
+          kubectl apply -f k8s/status-service/
+          kubectl apply -f k8s/ingress/ingress-eks.yaml
+
+      - name: Roll out the images built for this commit
+        run: |
+          reg="${{ steps.ecr.outputs.registry }}"
+          for svc in reports-service triage-service status-service; do
+            kubectl -n "$NAMESPACE" set image "deployment/$svc" \
+              "$svc=${reg}/rpd311/${svc}:${DEPLOY_SHA}"
+          done
+
+      - name: Wait for rollouts
+        run: |
+          for svc in reports-service triage-service status-service; do
+            kubectl -n "$NAMESPACE" rollout status "deployment/$svc" --timeout=180s
+          done

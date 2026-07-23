@@ -26,7 +26,6 @@ rpd311/
 │   ├── reports-service/     Node.js / Express  — port 3001  (public write API)
 │   ├── triage-service/      Python / FastAPI    — port 3002  (internal only, no ingress)
 │   └── status-service/      Go                 — port 3003  (public read API)
-├── specs/                   Convenience copies of OpenAPI specs (source of truth is in services/)
 ├── k8s/                     Kubernetes manifests (complete — do not modify without reason)
 ├── docker-compose.yml       To be created — base deps (Postgres, Redis, LocalStack)
 ├── docker-compose.local.yml To be created — local dev overrides
@@ -75,8 +74,21 @@ Implementation progress:
 
 All three services are now implemented and verified end-to-end via docker-compose
 (build → submit → triage callback → acknowledge → public status/feed/stats/heatmap →
-S3 attachment upload). Still absent: the `.github/workflows/` CI referenced in
-`README.md`, and there is **no git repo** yet.
+S3 attachment upload). CI/CD is wired up in `.github/workflows/`:
+- **ci.yaml** (push/PR to main): per-service unit test + lint (Node `npm test`; Python
+  `pytest`; Go `gofmt`/`vet`/`test`/`build`), a docker build of all three images, and an
+  **`integration` job** that boots the full compose stack and runs the cross-service
+  E2E suite. ECR push activates only on `main` when the `AWS_ROLE_ARN` repo variable is
+  set — otherwise build-only, so CI is green with no secrets configured.
+- **`e2e/`** — one HTTP harness, two jobs: `test_flow.py` (integration tests over the
+  live reports→triage→status flow + real Postgres/Redis/LocalStack, run by CI) and
+  `generate_traffic.py` (same flows on a loop, to feed the Insights Agent a connected
+  Service Graph). Config via `REPORTS_URL`/`TRIAGE_URL`/`STATUS_URL`/`SERVICE_TOKEN`
+  env (defaults match compose). Note: `/feed` and `/stats` are cached and not
+  write-invalidated, so tests assert on populated/mapped state, not post-write deltas.
+- **deploy.yaml** (after CI succeeds on main, or manual): OIDC → EKS `kubectl apply` +
+  image rollout. Self-skips unless the `EKS_CLUSTER_NAME` repo variable is set.
+  Required repo variables: `AWS_ROLE_ARN`, `AWS_REGION`, `EKS_CLUSTER_NAME`.
 
 Integration caveats learned from the compose run (all fixed in-tree unless noted):
 - **Cross-service `/health` must not recurse.** Peer connectivity checks send an
@@ -96,6 +108,30 @@ Integration caveats learned from the compose run (all fixed in-tree unless noted
   severity field; the authoritative severity lives on the triage assignment), and
   LocalStack presigned URLs embed the in-container `localstack:4566` host (EKS omits
   `S3_ENDPOINT_URL`, yielding real S3 URLs).
+
+Kubernetes / minikube (validated end-to-end — full flow + ingress + HPA + S3):
+- **Local datastores**: `k8s/dev/datastores.yaml` provides in-cluster Postgres/Redis/
+  LocalStack (service names match `secret-local.yaml` hosts). NOT applied on EKS (managed
+  services there). The production `k8s/` manifests assume the data stores already exist.
+- **Manifest bugs fixed** (were in the pre-existing manifests): `secret-local.yaml`
+  `REDIS_URL` port `3792`→`6379`; ingress `rewrite-target` `/$1`→`/v1/$1` (services serve
+  under `/v1`, so stripping it 404s); `postman.com/openapi-path: "/openapi.yaml"` moved
+  from a label to an annotation on reports+status deployments (label values can't contain `/`).
+- **Concurrent-replica migration race** (found on minikube): simultaneous
+  `CREATE EXTENSION/TYPE IF NOT EXISTS` from multiple replicas races on the pg catalog
+  unique index and crashes a pod on first boot. Fixed with a Postgres advisory lock around
+  migration (reports `db/migrate.js`, triage `db.py`).
+- **ingress-nginx snippets**: the traceparent `configuration-snippet` requires the
+  controller configmap to set BOTH `allow-snippet-annotations: "true"` and
+  `annotations-risk-level: "Critical"` (modern ingress-nginx blocks snippets by default).
+  Alternatively drop the snippet — nginx forwards `traceparent`/`tracestate` to upstreams
+  by default anyway.
+- **Local run recipe**: build `rpd311/<svc>:1.0.0` + `minikube image load` (deployments use
+  `imagePullPolicy: IfNotPresent`); apply base → `k8s/dev/datastores.yaml` → services →
+  `ingress-local.yaml`. On the macOS docker driver the ingress isn't directly routable —
+  reach it via `kubectl -n ingress-nginx port-forward svc/ingress-nginx-controller 18080:80`
+  and send `Host: rpd311.local`. triage-service correctly 404s through the ingress (no
+  public rule) while remaining reachable in-cluster.
 
 Local toolchain notes (this machine only — the Docker builds are unaffected):
 - **Python**: system is 3.14 but the stack targets 3.12. Use `uv venv --python 3.12`

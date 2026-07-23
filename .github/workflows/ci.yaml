@@ -1,0 +1,160 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # --- reports-service (Node.js 20) ---
+  reports-service:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/reports-service
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: services/reports-service/package-lock.json
+      - run: npm ci
+      - run: npm test
+
+  # --- triage-service (Python 3.12) ---
+  triage-service:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/triage-service
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: services/triage-service/requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: pytest -q
+
+  # --- status-service (Go 1.22) — gofmt + vet double as lint ---
+  status-service:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/status-service
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache-dependency-path: services/status-service/go.sum
+      - name: gofmt (fail on unformatted files)
+        run: |
+          unformatted="$(gofmt -l src)"
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"; echo "$unformatted"; exit 1
+          fi
+      - run: go vet ./src/...
+      - run: go test ./src/...
+      - run: go build -o /tmp/status-service ./src/...
+
+  # --- Build all three images; push to ECR only on main when AWS is configured ---
+  docker-build:
+    needs: [reports-service, triage-service, status-service]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # for AWS OIDC (only used when pushing)
+    strategy:
+      matrix:
+        service: [reports-service, triage-service, status-service]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Decide whether to push
+        id: meta
+        run: |
+          push=false
+          if [ "${{ github.event_name }}" = "push" ] && \
+             [ "${{ github.ref }}" = "refs/heads/main" ] && \
+             [ -n "${{ vars.AWS_ROLE_ARN }}" ]; then
+            push=true
+          fi
+          echo "push=$push" >>"$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials
+        id: aws
+        if: steps.meta.outputs.push == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Log in to Amazon ECR
+        id: ecr
+        if: steps.meta.outputs.push == 'true'
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Compute image tags
+        id: tags
+        run: |
+          if [ "${{ steps.meta.outputs.push }}" = "true" ]; then
+            reg="${{ steps.ecr.outputs.registry }}"
+            echo "value=${reg}/rpd311/${{ matrix.service }}:${{ github.sha }},${reg}/rpd311/${{ matrix.service }}:latest" >>"$GITHUB_OUTPUT"
+          else
+            # Build-only validation tag (never pushed).
+            echo "value=rpd311/${{ matrix.service }}:ci-${{ github.sha }}" >>"$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and (conditionally) push
+        uses: docker/build-push-action@v6
+        with:
+          context: services/${{ matrix.service }}
+          push: ${{ steps.meta.outputs.push == 'true' }}
+          tags: ${{ steps.tags.outputs.value }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # --- Cross-service integration tests: bring the whole stack up, drive the real
+  #     reports→triage→status flow, assert the seams (e2e/test_flow.py) ---
+  integration:
+    needs: [reports-service, triage-service, status-service]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: e2e/requirements.txt
+
+      - name: Start the full stack
+        run: docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
+
+      - name: Run integration tests
+        working-directory: e2e
+        env:
+          E2E_HEALTH_TIMEOUT: "120" # first boot builds schema + provisions the S3 bucket
+        run: |
+          pip install -r requirements.txt
+          pytest -q
+
+      - name: Dump service logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.yml -f docker-compose.local.yml logs --tail=100
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f docker-compose.yml -f docker-compose.local.yml down -v

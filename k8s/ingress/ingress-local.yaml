@@ -32,7 +32,10 @@ metadata:
     environment: local
   annotations:
     kubernetes.io/ingress.class: "nginx"
-    nginx.ingress.kubernetes.io/rewrite-target: /$1
+    # Preserve the /v1 prefix — the services mount their routes under /v1 (matching
+    # the OpenAPI `servers` base path), so the backend must receive /v1/reports…,
+    # not /reports…. (Was /$1, which stripped /v1 and produced 404s.)
+    nginx.ingress.kubernetes.io/rewrite-target: /v1/$1
     nginx.ingress.kubernetes.io/use-regex: "true"
     # Pass traceparent header through — required for Postman Service Graph
     nginx.ingress.kubernetes.io/configuration-snippet: |

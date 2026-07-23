@@ -42,8 +42,17 @@ def get_pool() -> asyncpg.Pool:
     return _pool
 
 
+# Serializes schema creation across concurrent replicas — see reports-service
+# migrate.js. IF NOT EXISTS on CREATE EXTENSION/TYPE is not atomic.
+_MIGRATION_LOCK_KEY = 3110002
+
+
 async def migrate() -> None:
     sql = _SCHEMA_PATH.read_text(encoding="utf-8")
     async with _pool.acquire() as conn:
-        await conn.execute(sql)
+        await conn.execute("SELECT pg_advisory_lock($1)", _MIGRATION_LOCK_KEY)
+        try:
+            await conn.execute(sql)
+        finally:
+            await conn.execute("SELECT pg_advisory_unlock($1)", _MIGRATION_LOCK_KEY)
     logger.info("Database schema verified. Dispatch board online.")

@@ -13,6 +13,8 @@ metadata:
     # Postman API Catalog discovery labels
     postman.com/service-name: reports-service
     postman.com/service-version: "1.0.0"
+  annotations:
+    # A slash-containing value is invalid as a label — it must be an annotation.
     postman.com/openapi-path: "/openapi.yaml"
 spec:
   replicas: 2   # baseline; HPA scales from 2–6
