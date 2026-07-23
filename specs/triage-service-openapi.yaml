@@ -1,0 +1,694 @@
+openapi: 3.1.0
+
+info:
+  title: RPD 311 — Triage Service
+  version: 1.0.0
+  description: |
+    Internal-only classification and routing service for the Raccoon City civic
+    incident reporting platform. Receives new reports from `reports-service`,
+    applies severity classification and department routing logic, and dispatches
+    assignments to the appropriate city department queue.
+
+    **This service has no public endpoints.** It is not reachable via the public
+    ingress and does not accept resident JWT tokens. All endpoints require a valid
+    service-to-service token (`X-Service-Token` header).
+
+    The triage-service is intentionally invisible to residents — it exists entirely
+    within the Kubernetes cluster. It will not appear in API Catalog without the
+    Postman Insights Agent or Cluster Watcher running in the cluster.
+
+    > "All incidents are reviewed in order of severity. UMBRELLA_CORP_ACTIVITY
+    > reports are escalated immediately, regardless of queue depth. STARS Unit
+    > has been notified. Please do not attempt to investigate independently."
+    > — RPD Dispatch
+
+    ### Routing logic
+
+    | Incident type | Severity override | Routed to |
+    |---|---|---|
+    | `POTHOLE` | LOW | Public Works |
+    | `DOWNED_TREE` | LOW | Public Works |
+    | `NOISE_COMPLAINT` | MEDIUM | RPD Non-Emergency |
+    | `SUSPICIOUS_PERSON` | MEDIUM | RPD Non-Emergency |
+    | `VANDALISM` | MEDIUM | RPD Non-Emergency + Sanitation |
+    | `CAR_BREAK_IN` | HIGH | RPD Emergency |
+    | `ZOMBIE_SIGHTING` | CRITICAL | RPD Emergency + STARS Unit |
+    | `UMBRELLA_CORP_ACTIVITY` | CRITICAL | STARS Unit (immediate; bypasses queue) |
+
+    Severity provided by the submitter is always overridden by triage classification.
+
+    ### Service dependencies
+    - **reports-service** — source of incoming reports; triage-service calls back
+      to `PATCH /reports/{reportId}/status` after routing
+    - **triage-service** (this service) — no outbound calls beyond reports-service
+
+  contact:
+    name: Raccoon City Civic Platform Team
+    email: platform@rpd311.raccoon.gov
+  license:
+    name: City of Raccoon City Public API License
+    url: https://rpd311.raccoon.gov/legal
+
+servers:
+  - url: http://triage-service.rpd311.svc.cluster.local/v1
+    description: In-cluster (Kubernetes service DNS — not externally reachable)
+  - url: http://localhost:3002/v1
+    description: Local development
+
+tags:
+  - name: Triage
+    description: Report classification and routing
+  - name: Assignments
+    description: Routing decisions and department assignment records
+  - name: Queue
+    description: Department queue management
+  - name: Health
+    description: Service health and readiness
+
+paths:
+
+  /triage:
+    post:
+      operationId: triageReport
+      summary: Classify and route an incident report
+      description: |
+        Receives a report forwarded by `reports-service`, applies classification
+        logic to determine severity and department routing, persists the routing
+        decision, and dispatches assignments to the appropriate department queue(s).
+
+        After routing, triage-service calls back to `reports-service`
+        (`PATCH /reports/{reportId}/status`) to update the report status to `TRIAGED`.
+
+        Reports with type `UMBRELLA_CORP_ACTIVITY` bypass the standard queue and
+        are dispatched directly to the STARS Unit escalation channel.
+
+        This endpoint is called exclusively by `reports-service` on new report
+        creation. It is not intended to be called directly.
+      tags: [Triage]
+      security:
+        - serviceToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TriageRequest'
+            examples:
+              noise_complaint:
+                summary: Noise complaint — routed to RPD Non-Emergency
+                value:
+                  reportId: "a3f1c2d4-7e8b-4a9f-b0c1-2d3e4f5a6b7c"
+                  type: NOISE_COMPLAINT
+                  description: >
+                    Sustained groaning from apartment 4B since approximately 2am.
+                    Knocking produced no intelligible response.
+                  location:
+                    lat: 44.7831
+                    lng: -93.2185
+                    address: "1428 Arklay Street, Apt 4B, Raccoon City"
+                  submitterSeverity: MEDIUM
+                  receivedAt: "2026-07-22T02:14:00Z"
+              zombie_sighting:
+                summary: Zombie sighting — CRITICAL escalation
+                value:
+                  reportId: "b2e3f4a5-8c9d-4b0e-c1f2-3d4e5f6a7b8c"
+                  type: ZOMBIE_SIGHTING
+                  description: >
+                    Multiple individuals moving erratically on Raccoon City Main Street.
+                    Subjects unresponsive to verbal communication. Bite marks visible.
+                  location:
+                    lat: 44.7891
+                    lng: -93.2251
+                    address: "Raccoon City Main Street, between 3rd and 4th Ave"
+                  submitterSeverity: CRITICAL
+                  receivedAt: "2026-07-22T03:01:00Z"
+              umbrella_activity:
+                summary: Umbrella Corp activity — immediate STARS escalation
+                value:
+                  reportId: "c3f4a5b6-9d0e-4c1f-d2a3-4e5f6a7b8c9d"
+                  type: UMBRELLA_CORP_ACTIVITY
+                  description: >
+                    White unmarked vans unloading biohazard-labelled containers into
+                    the Umbrella Research Annex at 0300hrs.
+                  location:
+                    lat: 44.7712
+                    lng: -93.2099
+                    address: "Umbrella Research Annex, 7 Birkin Blvd, Raccoon City"
+                  submitterSeverity: CRITICAL
+                  receivedAt: "2026-07-22T03:05:00Z"
+      responses:
+        '201':
+          description: Report classified and routed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TriageResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Report has already been triaged
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: ALREADY_TRIAGED
+                message: "Report a3f1c2d4-7e8b-4a9f-b0c1-2d3e4f5a6b7c has already been assigned."
+                requestId: "d4a5b6c7-0e1f-4d2a-b3c4-5d6e7f8a9b0c"
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /triage/batch:
+    post:
+      operationId: triageReportBatch
+      summary: Classify and route multiple reports
+      description: |
+        Batch variant of `POST /triage`. Accepts up to 50 reports in a single
+        request. Useful during high-incident periods (city-wide emergencies,
+        outbreak events) when `reports-service` needs to flush a backlog.
+
+        Each report is processed independently. Partial failures are reported
+        in the response — a failure on one report does not abort the batch.
+
+        Reports with type `ZOMBIE_SIGHTING` or `UMBRELLA_CORP_ACTIVITY` in a
+        batch are always processed first, regardless of order in the request body.
+      tags: [Triage]
+      security:
+        - serviceToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reports]
+              properties:
+                reports:
+                  type: array
+                  minItems: 1
+                  maxItems: 50
+                  items:
+                    $ref: '#/components/schemas/TriageRequest'
+      responses:
+        '207':
+          description: Batch processed (partial success possible — check individual results)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TriageBatchResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /assignments/{reportId}:
+    get:
+      operationId: getAssignment
+      summary: Get routing decision for a report
+      description: |
+        Returns the triage assignment record for a given report ID, including
+        the severity classification, routed departments, queue position, and
+        timestamps. Called by `status-service` to hydrate public status responses.
+      tags: [Assignments]
+      security:
+        - serviceToken: []
+      parameters:
+        - $ref: '#/components/parameters/reportId'
+      responses:
+        '200':
+          description: Assignment found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssignmentResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: No assignment found for this report ID
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: ASSIGNMENT_NOT_FOUND
+                message: "No triage assignment exists for report a3f1c2d4-7e8b-4a9f-b0c1-2d3e4f5a6b7c. The report may not yet have been triaged."
+                requestId: "e5b6c7d8-1f2a-4e3b-c4d5-6e7f8a9b0c1d"
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /queue/{department}:
+    get:
+      operationId: getDepartmentQueue
+      summary: List pending assignments for a department
+      description: |
+        Returns a paginated list of pending assignments routed to the specified
+        department, ordered by severity (CRITICAL first) then by `receivedAt`
+        ascending (oldest first).
+
+        Department identifiers are internal codes used by the routing engine.
+        Valid values are enumerated in the `Department` schema.
+      tags: [Queue]
+      security:
+        - serviceToken: []
+      parameters:
+        - name: department
+          in: path
+          required: true
+          description: Department identifier
+          schema:
+            $ref: '#/components/schemas/Department'
+        - name: status
+          in: query
+          description: Filter by assignment status
+          schema:
+            $ref: '#/components/schemas/AssignmentStatus'
+        - name: severity
+          in: query
+          description: Filter by severity level
+          schema:
+            $ref: '#/components/schemas/SeverityLevel'
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        '200':
+          description: Department queue
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QueueResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /queue/{department}/assignments/{assignmentId}/acknowledge:
+    post:
+      operationId: acknowledgeAssignment
+      summary: Acknowledge a queued assignment
+      description: |
+        Marks a queued assignment as acknowledged by the receiving department.
+        Triggers a callback to `reports-service` to update the report status
+        to `IN_PROGRESS`.
+
+        Called by department dispatch systems, not by residents or other services.
+      tags: [Queue]
+      security:
+        - serviceToken: []
+      parameters:
+        - name: department
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/Department'
+        - name: assignmentId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [acknowledgedBy]
+              properties:
+                acknowledgedBy:
+                  type: string
+                  maxLength: 200
+                  description: Officer ID or department system identifier
+                  example: "RPD-DISPATCH-001"
+                note:
+                  type: string
+                  maxLength: 500
+                  description: Optional acknowledgement note
+                  example: "Unit dispatched. ETA 12 minutes. Area cordoned."
+      responses:
+        '200':
+          description: Assignment acknowledged
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssignmentResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Assignment already acknowledged
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /health:
+    get:
+      operationId: healthCheck
+      summary: Health check
+      description: |
+        Returns service health. Called by Kubernetes liveness and readiness probes
+        and by the Postman Insights Agent during service discovery.
+      tags: [Health]
+      security: []
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '503':
+          description: Service is unhealthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+components:
+
+  securitySchemes:
+    serviceToken:
+      type: apiKey
+      in: header
+      name: X-Service-Token
+      description: |
+        Internal service-to-service shared secret. Required on all endpoints.
+        Resident JWT tokens are explicitly rejected — this service is not
+        reachable from the public ingress.
+
+  parameters:
+    reportId:
+      name: reportId
+      in: path
+      required: true
+      description: Unique report identifier (UUID v4) from reports-service
+      schema:
+        type: string
+        format: uuid
+        example: "a3f1c2d4-7e8b-4a9f-b0c1-2d3e4f5a6b7c"
+
+  schemas:
+
+    IncidentType:
+      type: string
+      description: |
+        Incident type forwarded from reports-service. Mirrors the enum defined
+        in the reports-service OpenAPI spec — these values must stay in sync.
+      enum:
+        - POTHOLE
+        - DOWNED_TREE
+        - NOISE_COMPLAINT
+        - SUSPICIOUS_PERSON
+        - VANDALISM
+        - CAR_BREAK_IN
+        - ZOMBIE_SIGHTING
+        - UMBRELLA_CORP_ACTIVITY
+
+    SeverityLevel:
+      type: string
+      description: |
+        Triage-assigned severity. Always overrides the submitter-provided value.
+        Drives queue priority ordering — CRITICAL reports are always processed first.
+      enum:
+        - LOW
+        - MEDIUM
+        - HIGH
+        - CRITICAL
+
+    Department:
+      type: string
+      description: |
+        Internal department identifier used by the routing engine.
+
+        | Code | Department | Handles |
+        |---|---|---|
+        | `PUBLIC_WORKS` | Public Works | POTHOLE, DOWNED_TREE |
+        | `RPD_NON_EMERGENCY` | RPD Non-Emergency Line | NOISE_COMPLAINT, SUSPICIOUS_PERSON, VANDALISM |
+        | `RPD_EMERGENCY` | RPD Emergency Dispatch | CAR_BREAK_IN, ZOMBIE_SIGHTING |
+        | `SANITATION` | Raccoon City Sanitation | VANDALISM (secondary routing) |
+        | `STARS_UNIT` | Special Tactics and Rescue Service | ZOMBIE_SIGHTING (secondary), UMBRELLA_CORP_ACTIVITY (primary, immediate) |
+      enum:
+        - PUBLIC_WORKS
+        - RPD_NON_EMERGENCY
+        - RPD_EMERGENCY
+        - SANITATION
+        - STARS_UNIT
+
+    AssignmentStatus:
+      type: string
+      description: Lifecycle status of a triage assignment.
+      enum:
+        - PENDING       # routed, awaiting department acknowledgement
+        - ACKNOWLEDGED  # department has acknowledged the assignment
+        - COMPLETED     # department has resolved the incident
+        - CANCELLED     # assignment cancelled (duplicate, invalid report)
+        - ESCALATED     # escalated to a higher-priority department
+
+    Location:
+      type: object
+      required: [lat, lng]
+      properties:
+        lat:
+          type: number
+          format: float
+          minimum: -90
+          maximum: 90
+          example: 44.7831
+        lng:
+          type: number
+          format: float
+          minimum: -180
+          maximum: 180
+          example: -93.2185
+        address:
+          type: string
+          maxLength: 500
+          example: "1428 Arklay Street, Raccoon City"
+
+    TriageRequest:
+      type: object
+      required: [reportId, type, description, location, receivedAt]
+      properties:
+        reportId:
+          type: string
+          format: uuid
+          description: ID of the report being triaged, as issued by reports-service
+          example: "a3f1c2d4-7e8b-4a9f-b0c1-2d3e4f5a6b7c"
+        type:
+          $ref: '#/components/schemas/IncidentType'
+        description:
+          type: string
+          maxLength: 2000
+          description: Incident description forwarded verbatim from reports-service
+        location:
+          $ref: '#/components/schemas/Location'
+        submitterSeverity:
+          $ref: '#/components/schemas/SeverityLevel'
+          description: Severity as provided by the resident submitter — used for audit only
+        receivedAt:
+          type: string
+          format: date-time
+          description: Timestamp when the report was originally received by reports-service
+          example: "2026-07-22T02:14:00Z"
+
+    RoutingDecision:
+      type: object
+      description: The output of the triage classification engine for a single report.
+      properties:
+        assignedSeverity:
+          $ref: '#/components/schemas/SeverityLevel'
+          description: Triage-assigned severity (always overrides submitterSeverity)
+        departments:
+          type: array
+          description: One or more departments this report is routed to
+          minItems: 1
+          items:
+            type: object
+            properties:
+              department:
+                $ref: '#/components/schemas/Department'
+              isPrimary:
+                type: boolean
+                description: True for the lead department; false for secondary (cc) routing
+              immediateEscalation:
+                type: boolean
+                description: If true, bypasses queue and dispatches immediately (UMBRELLA_CORP_ACTIVITY only)
+                default: false
+        classificationReason:
+          type: string
+          description: Human-readable explanation of the routing decision (for audit log)
+          example: >
+            ZOMBIE_SIGHTING classified as CRITICAL. Primary routing to RPD_EMERGENCY.
+            Secondary routing to STARS_UNIT per standing escalation protocol.
+
+    TriageResponse:
+      type: object
+      properties:
+        assignmentId:
+          type: string
+          format: uuid
+          description: Unique ID for this triage assignment record
+          example: "f6c7d8e9-2a3b-4f4c-d5e6-7f8a9b0c1d2e"
+        reportId:
+          type: string
+          format: uuid
+          example: "a3f1c2d4-7e8b-4a9f-b0c1-2d3e4f5a6b7c"
+        routing:
+          $ref: '#/components/schemas/RoutingDecision'
+        status:
+          $ref: '#/components/schemas/AssignmentStatus'
+        triagedAt:
+          type: string
+          format: date-time
+          example: "2026-07-22T02:14:03Z"
+
+    TriageBatchResponse:
+      type: object
+      properties:
+        processed:
+          type: integer
+          description: Number of reports successfully triaged
+          example: 47
+        failed:
+          type: integer
+          description: Number of reports that failed triage
+          example: 3
+        results:
+          type: array
+          items:
+            type: object
+            properties:
+              reportId:
+                type: string
+                format: uuid
+              success:
+                type: boolean
+              assignment:
+                $ref: '#/components/schemas/TriageResponse'
+                description: Populated on success
+              error:
+                $ref: '#/components/schemas/ErrorResponse'
+                description: Populated on failure
+
+    AssignmentResponse:
+      type: object
+      properties:
+        assignmentId:
+          type: string
+          format: uuid
+          example: "f6c7d8e9-2a3b-4f4c-d5e6-7f8a9b0c1d2e"
+        reportId:
+          type: string
+          format: uuid
+          example: "a3f1c2d4-7e8b-4a9f-b0c1-2d3e4f5a6b7c"
+        routing:
+          $ref: '#/components/schemas/RoutingDecision'
+        status:
+          $ref: '#/components/schemas/AssignmentStatus'
+        acknowledgedBy:
+          type: string
+          description: Officer or system that acknowledged the assignment (null if PENDING)
+          example: "RPD-DISPATCH-001"
+        acknowledgedAt:
+          type: string
+          format: date-time
+          nullable: true
+        triagedAt:
+          type: string
+          format: date-time
+          example: "2026-07-22T02:14:03Z"
+        updatedAt:
+          type: string
+          format: date-time
+          example: "2026-07-22T02:26:00Z"
+
+    QueueResponse:
+      type: object
+      properties:
+        department:
+          $ref: '#/components/schemas/Department'
+        assignments:
+          type: array
+          items:
+            $ref: '#/components/schemas/AssignmentResponse'
+        total:
+          type: integer
+          description: Total pending assignments in queue
+          example: 34
+        criticalCount:
+          type: integer
+          description: Number of CRITICAL severity assignments currently pending
+          example: 12
+        limit:
+          type: integer
+          example: 20
+        offset:
+          type: integer
+          example: 0
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [healthy, degraded, unhealthy]
+          example: healthy
+        service:
+          type: string
+          example: triage-service
+        version:
+          type: string
+          example: "1.0.0"
+        timestamp:
+          type: string
+          format: date-time
+        dependencies:
+          type: object
+          properties:
+            postgres:
+              type: string
+              enum: [healthy, unhealthy]
+              example: healthy
+            reportsService:
+              type: string
+              enum: [healthy, unhealthy, unknown]
+              description: Connectivity to reports-service callback endpoint
+              example: healthy
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Machine-readable error code
+          example: "ALREADY_TRIAGED"
+        message:
+          type: string
+          description: Human-readable error description
+        requestId:
+          type: string
+          format: uuid

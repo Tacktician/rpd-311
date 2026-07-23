@@ -1,0 +1,29 @@
+# triage-service Kubernetes Service
+#
+# ClusterIP only — this service is intentionally NOT exposed via ingress.
+# It is reachable only within the rpd311 namespace via cluster DNS:
+#   http://triage-service.rpd311.svc.cluster.local/v1
+#
+# From outside the cluster, triage-service is invisible — no public URL,
+# no ALB listener, no ingress rule. It will not appear in Postman API Catalog
+# until the Insights Agent (Lesson 6) or Cluster Watcher (Lesson 7) discovers it.
+# This is the core demo moment for both lessons.
+#
+apiVersion: v1
+kind: Service
+metadata:
+  name: triage-service
+  namespace: rpd311
+  labels:
+    app: triage-service
+    app.kubernetes.io/name: triage-service
+    app.kubernetes.io/part-of: rpd311
+spec:
+  type: ClusterIP   # intentional — do not change to LoadBalancer or NodePort
+  selector:
+    app: triage-service
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP

@@ -1,0 +1,709 @@
+openapi: 3.1.0
+
+info:
+  title: RPD 311 — Reports Service
+  version: 1.0.0
+  description: |
+    The primary public-facing API for the Raccoon City civic incident reporting platform.
+    Residents submit incident reports, attach photos, and track report status through this service.
+
+    The Reports Service is one of three microservices in the RPD 311 platform:
+    - **reports-service** (this service) — incident submission and management
+    - **triage-service** — internal routing and department assignment
+    - **status-service** — public read-only status and statistics
+
+    > "Raccoon City is committed to responsive civic services. Please allow 3–5 business days
+    > for non-emergency incidents. Zombie-related complaints may experience longer resolution
+    > times due to staffing constraints." — Office of the Mayor
+
+  contact:
+    name: Raccoon City Civic Platform Team
+    email: platform@rpd311.raccoon.gov
+  license:
+    name: City of Raccoon City Public API License
+    url: https://rpd311.raccoon.gov/legal
+
+servers:
+  - url: https://api.rpd311.raccoon.gov/v1
+    description: Production (EKS — us-east-1)
+  - url: http://localhost:3001/v1
+    description: Local development
+
+tags:
+  - name: Reports
+    description: Incident report submission and management
+  - name: Attachments
+    description: Photo and file attachments for reports
+  - name: Health
+    description: Service health and readiness
+
+paths:
+
+  /reports:
+    post:
+      operationId: createReport
+      summary: Submit a new incident report
+      description: |
+        Submit a new civic incident report. Authenticated requests are associated with
+        the submitting resident. Unauthenticated submissions are accepted but may receive
+        lower triage priority.
+
+        On successful submission, the report is forwarded to `triage-service` for
+        classification and department routing. Submitters receive a `reportId` for
+        tracking via `status-service`.
+      tags: [Reports]
+      security:
+        - bearerAuth: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateReportRequest'
+            examples:
+              noise_complaint:
+                summary: Noise complaint (classic)
+                value:
+                  type: NOISE_COMPLAINT
+                  description: >
+                    Sustained groaning from apartment 4B since approximately 2am.
+                    Knocking on the door produced no intelligible response.
+                  location:
+                    lat: 44.7831
+                    lng: -93.2185
+                    address: "1428 Arklay Street, Apt 4B, Raccoon City"
+                  severity: MEDIUM
+              zombie_sighting:
+                summary: Zombie sighting (escalated)
+                value:
+                  type: ZOMBIE_SIGHTING
+                  description: >
+                    Multiple individuals observed moving erratically on Raccoon City
+                    Main Street. Subjects unresponsive to verbal communication.
+                    Bite marks visible on at least three individuals.
+                  location:
+                    lat: 44.7891
+                    lng: -93.2251
+                    address: "Raccoon City Main Street, between 3rd and 4th Ave"
+                  severity: CRITICAL
+              umbrella_activity:
+                summary: Umbrella Corporation activity
+                value:
+                  type: UMBRELLA_CORP_ACTIVITY
+                  description: >
+                    White unmarked vans observed unloading unknown containers into
+                    the Umbrella Research Annex on Birkin Boulevard at 0300hrs.
+                    Containers were labelled with biohazard symbols.
+                  location:
+                    lat: 44.7712
+                    lng: -93.2099
+                    address: "Umbrella Research Annex, 7 Birkin Blvd, Raccoon City"
+                  severity: CRITICAL
+      responses:
+        '201':
+          description: Report submitted successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReportResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    get:
+      operationId: listReports
+      summary: List incident reports
+      description: |
+        Returns a paginated list of incident reports. Supports filtering by type,
+        status, severity, and location radius. Sensitive fields (reporter contact info,
+        internal notes) are excluded from public responses.
+
+        Results are ordered by `createdAt` descending by default.
+      tags: [Reports]
+      security:
+        - bearerAuth: []
+        - {}
+      parameters:
+        - name: type
+          in: query
+          description: Filter by incident type
+          schema:
+            $ref: '#/components/schemas/IncidentType'
+        - name: status
+          in: query
+          description: Filter by report status
+          schema:
+            $ref: '#/components/schemas/ReportStatus'
+        - name: severity
+          in: query
+          description: Filter by severity level
+          schema:
+            $ref: '#/components/schemas/SeverityLevel'
+        - name: lat
+          in: query
+          description: Latitude for location-based filtering (requires lng and radius)
+          schema:
+            type: number
+            format: float
+            minimum: -90
+            maximum: 90
+        - name: lng
+          in: query
+          description: Longitude for location-based filtering (requires lat and radius)
+          schema:
+            type: number
+            format: float
+            minimum: -180
+            maximum: 180
+        - name: radius
+          in: query
+          description: Radius in meters for location-based filtering
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50000
+            default: 1000
+        - name: limit
+          in: query
+          description: Number of results per page
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: offset
+          in: query
+          description: Pagination offset
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        '200':
+          description: List of reports
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReportListResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /reports/{reportId}:
+    get:
+      operationId: getReport
+      summary: Retrieve a single report
+      description: |
+        Returns a single incident report by ID. This endpoint is public — no
+        authentication required. Sensitive fields are redacted for unauthenticated callers.
+      tags: [Reports]
+      security:
+        - bearerAuth: []
+        - {}
+      parameters:
+        - $ref: '#/components/parameters/reportId'
+      responses:
+        '200':
+          description: Report found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReportResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /reports/{reportId}/status:
+    patch:
+      operationId: updateReportStatus
+      summary: Update report status
+      description: |
+        Updates the status of an existing report. This endpoint is **internal only**
+        and is called by `triage-service` when a routing decision is made, or by
+        department staff when a report is resolved.
+
+        Requires a valid service-to-service token or an authenticated staff role.
+        Resident JWT tokens are rejected.
+      tags: [Reports]
+      security:
+        - serviceToken: []
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/reportId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateStatusRequest'
+      responses:
+        '200':
+          description: Status updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReportResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /reports/{reportId}/attachments:
+    post:
+      operationId: addAttachment
+      summary: Upload a photo attachment
+      description: |
+        Attaches a photo or file to an existing report. Files are stored in S3
+        (`rpd311-attachments` bucket). Returns a pre-signed URL valid for 24 hours.
+
+        Maximum file size: 10MB. Accepted types: `image/jpeg`, `image/png`, `image/webp`.
+      tags: [Attachments]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/reportId'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: Image file to attach (JPEG, PNG, or WebP; max 10MB)
+                caption:
+                  type: string
+                  maxLength: 280
+                  description: Optional caption for the attachment
+      responses:
+        '201':
+          description: Attachment uploaded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttachmentResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          description: File too large (max 10MB)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '415':
+          description: Unsupported media type
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    get:
+      operationId: listAttachments
+      summary: List attachments for a report
+      description: Returns all attachments associated with a report, including pre-signed S3 URLs.
+      tags: [Attachments]
+      security:
+        - bearerAuth: []
+        - {}
+      parameters:
+        - $ref: '#/components/parameters/reportId'
+      responses:
+        '200':
+          description: List of attachments
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  attachments:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AttachmentResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /health:
+    get:
+      operationId: healthCheck
+      summary: Health check
+      description: |
+        Returns service health status. Called by the Kubernetes liveness and
+        readiness probes. Also checked by the Postman Insights Agent during
+        service discovery.
+      tags: [Health]
+      security: []
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '503':
+          description: Service is unhealthy (dependency failure)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Resident JWT issued by auth-service (not yet implemented — stub for demo)
+    serviceToken:
+      type: apiKey
+      in: header
+      name: X-Service-Token
+      description: Internal service-to-service shared secret for triage-service callbacks
+
+  parameters:
+    reportId:
+      name: reportId
+      in: path
+      required: true
+      description: Unique report identifier (UUID v4)
+      schema:
+        type: string
+        format: uuid
+        example: "a3f1c2d4-7e8b-4a9f-b0c1-2d3e4f5a6b7c"
+
+  schemas:
+
+    IncidentType:
+      type: string
+      description: |
+        Classification of the reported incident. Used by `triage-service` to determine
+        severity and department routing.
+
+        | Type | Severity | Routes to |
+        |---|---|---|
+        | `POTHOLE` | LOW | Public Works |
+        | `DOWNED_TREE` | LOW | Public Works |
+        | `NOISE_COMPLAINT` | MEDIUM | RPD Non-Emergency |
+        | `SUSPICIOUS_PERSON` | MEDIUM | RPD Non-Emergency |
+        | `VANDALISM` | MEDIUM | RPD Non-Emergency + Sanitation |
+        | `CAR_BREAK_IN` | HIGH | RPD Emergency |
+        | `ZOMBIE_SIGHTING` | CRITICAL | RPD Emergency + STARS Unit |
+        | `UMBRELLA_CORP_ACTIVITY` | CRITICAL | STARS Unit (immediate escalation) |
+      enum:
+        - POTHOLE
+        - DOWNED_TREE
+        - NOISE_COMPLAINT
+        - SUSPICIOUS_PERSON
+        - VANDALISM
+        - CAR_BREAK_IN
+        - ZOMBIE_SIGHTING
+        - UMBRELLA_CORP_ACTIVITY
+
+    SeverityLevel:
+      type: string
+      description: |
+        Severity level of the incident. May be provided by the submitter but is
+        always overridden by `triage-service` classification logic.
+      enum:
+        - LOW
+        - MEDIUM
+        - HIGH
+        - CRITICAL
+
+    ReportStatus:
+      type: string
+      description: Lifecycle status of the report.
+      enum:
+        - SUBMITTED       # received, awaiting triage
+        - TRIAGED         # routed to department by triage-service
+        - IN_PROGRESS     # department has acknowledged
+        - RESOLVED        # incident resolved
+        - CLOSED          # closed without resolution (duplicate, invalid, etc.)
+        - ESCALATED       # elevated to STARS Unit or emergency services
+
+    Location:
+      type: object
+      required: [lat, lng]
+      properties:
+        lat:
+          type: number
+          format: float
+          minimum: -90
+          maximum: 90
+          description: Latitude (WGS84)
+          example: 44.7831
+        lng:
+          type: number
+          format: float
+          minimum: -180
+          maximum: 180
+          description: Longitude (WGS84)
+          example: -93.2185
+        address:
+          type: string
+          maxLength: 500
+          description: Human-readable address (optional but recommended)
+          example: "1428 Arklay Street, Raccoon City"
+
+    CreateReportRequest:
+      type: object
+      required: [type, description, location]
+      properties:
+        type:
+          $ref: '#/components/schemas/IncidentType'
+        description:
+          type: string
+          minLength: 10
+          maxLength: 2000
+          description: Detailed description of the incident
+          example: >
+            Sustained groaning from apartment 4B since approximately 2am.
+            Knocking produced no intelligible response.
+        location:
+          $ref: '#/components/schemas/Location'
+        severity:
+          $ref: '#/components/schemas/SeverityLevel'
+          description: |
+            Submitter-provided severity hint. Will be overridden by triage-service.
+            Defaults to MEDIUM if omitted.
+        reporterName:
+          type: string
+          maxLength: 200
+          description: Optional reporter name (redacted from public responses)
+          example: "Leon S. Kennedy"
+        reporterContact:
+          type: string
+          maxLength: 200
+          description: Optional contact info — email or phone (redacted from public responses)
+          example: "leon.kennedy@rpd.raccoon.gov"
+        anonymous:
+          type: boolean
+          default: false
+          description: If true, reporter identity is not stored even if a JWT is provided
+
+    UpdateStatusRequest:
+      type: object
+      required: [status]
+      properties:
+        status:
+          $ref: '#/components/schemas/ReportStatus'
+        note:
+          type: string
+          maxLength: 1000
+          description: Internal note accompanying the status change
+          example: "STARS Unit dispatched. Area cordoned. Residents advised to shelter in place."
+        resolvedBy:
+          type: string
+          maxLength: 200
+          description: Department or officer ID that resolved the report
+
+    ReportResponse:
+      type: object
+      properties:
+        reportId:
+          type: string
+          format: uuid
+          example: "a3f1c2d4-7e8b-4a9f-b0c1-2d3e4f5a6b7c"
+        type:
+          $ref: '#/components/schemas/IncidentType'
+        description:
+          type: string
+          example: "Sustained groaning from apartment 4B since approximately 2am."
+        location:
+          $ref: '#/components/schemas/Location'
+        severity:
+          $ref: '#/components/schemas/SeverityLevel'
+        status:
+          $ref: '#/components/schemas/ReportStatus'
+        anonymous:
+          type: boolean
+        attachmentCount:
+          type: integer
+          example: 2
+        createdAt:
+          type: string
+          format: date-time
+          example: "2026-07-22T03:14:00Z"
+        updatedAt:
+          type: string
+          format: date-time
+          example: "2026-07-22T03:45:00Z"
+        triageReference:
+          type: string
+          format: uuid
+          description: ID of the triage assignment (populated after triage-service processes the report)
+          example: "b1d2e3f4-8a9b-4c0d-e1f2-3a4b5c6d7e8f"
+
+    ReportListResponse:
+      type: object
+      properties:
+        reports:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReportResponse'
+        total:
+          type: integer
+          description: Total number of matching reports (for pagination)
+          example: 142
+        limit:
+          type: integer
+          example: 20
+        offset:
+          type: integer
+          example: 0
+
+    AttachmentResponse:
+      type: object
+      properties:
+        attachmentId:
+          type: string
+          format: uuid
+          example: "c2e3f4a5-9b0c-4d1e-f2a3-4b5c6d7e8f9a"
+        reportId:
+          type: string
+          format: uuid
+        filename:
+          type: string
+          example: "incident-photo-01.jpg"
+        mimeType:
+          type: string
+          example: "image/jpeg"
+        sizeBytes:
+          type: integer
+          example: 1048576
+        caption:
+          type: string
+          example: "Northeast corner of Arklay Street. Subject visible in doorway."
+        url:
+          type: string
+          format: uri
+          description: Pre-signed S3 URL (valid for 24 hours)
+          example: "https://rpd311-attachments.s3.amazonaws.com/..."
+        uploadedAt:
+          type: string
+          format: date-time
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [healthy, degraded, unhealthy]
+          example: healthy
+        service:
+          type: string
+          example: reports-service
+        version:
+          type: string
+          example: "1.0.0"
+        timestamp:
+          type: string
+          format: date-time
+        dependencies:
+          type: object
+          description: Health status of downstream dependencies
+          properties:
+            postgres:
+              type: string
+              enum: [healthy, unhealthy]
+              example: healthy
+            s3:
+              type: string
+              enum: [healthy, unhealthy]
+              example: healthy
+            triageService:
+              type: string
+              enum: [healthy, unhealthy, unknown]
+              example: healthy
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Machine-readable error code
+          example: "VALIDATION_ERROR"
+        message:
+          type: string
+          description: Human-readable error description
+          example: "The 'type' field is required."
+        details:
+          type: array
+          description: Field-level validation errors
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+                example: "location.lat"
+              message:
+                type: string
+                example: "Must be a valid latitude between -90 and 90."
+        requestId:
+          type: string
+          format: uuid
+          description: Unique request ID for support tracing
+          example: "d3f4a5b6-0c1d-4e2f-a3b4-5c6d7e8f9a0b"
+
+  responses:
+    BadRequest:
+      description: Bad request — invalid parameters or malformed body
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Unauthorized:
+      description: Missing or invalid authentication token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Forbidden:
+      description: Authenticated but insufficient permissions
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFound:
+      description: Report not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    UnprocessableEntity:
+      description: Request is well-formed but semantically invalid
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    InternalServerError:
+      description: Unexpected server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'

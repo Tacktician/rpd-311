@@ -1,0 +1,91 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: triage-service
+  namespace: rpd311
+  labels:
+    app: triage-service
+    app.kubernetes.io/name: triage-service
+    app.kubernetes.io/part-of: rpd311
+    app.kubernetes.io/version: "1.0.0"
+    team: civic-platform
+    environment: demo
+    # Postman API Catalog discovery labels
+    # This service has no public ingress — it will only appear in API Catalog
+    # after the Postman Insights Agent or Cluster Watcher discovers it.
+    # This is the key teaching moment for Lessons 6 and 7.
+    postman.com/service-name: triage-service
+    postman.com/service-version: "1.0.0"
+    postman.com/visibility: "internal"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: triage-service
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: triage-service
+        app.kubernetes.io/name: triage-service
+        app.kubernetes.io/part-of: rpd311
+        postman.com/service-name: triage-service
+      annotations:
+        checksum/config: "placeholder-updated-by-ci"
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: triage-service
+          # TODO: replace with your ECR image URI before deploying to EKS
+          image: rpd311/triage-service:1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 3002
+              protocol: TCP
+          env:
+            - name: PORT
+              value: "3002"
+            - name: SERVICE_NAME
+              value: "triage-service"
+          envFrom:
+            - configMapRef:
+                name: rpd311-common
+            - secretRef:
+                name: rpd311-secrets
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /v1/health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /v1/health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop: [ALL]
+      securityContext:
+        fsGroup: 1000

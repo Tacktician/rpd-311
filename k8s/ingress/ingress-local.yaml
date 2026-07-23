@@ -1,0 +1,75 @@
+# ingress-local.yaml — LOCAL DEVELOPMENT (minikube / kind)
+# Uses nginx ingress controller.
+#
+# Enable nginx ingress on minikube:
+#   minikube addons enable ingress
+#
+# Enable nginx ingress on kind:
+#   kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml
+#
+# Access locally via:
+#   minikube: $(minikube ip)  — add to /etc/hosts as rpd311.local
+#   kind:     localhost       — add to /etc/hosts as rpd311.local
+#
+# /etc/hosts entry:
+#   127.0.0.1   rpd311.local
+#
+# Routes:
+#   https://rpd311.local/v1/reports*   → reports-service
+#   https://rpd311.local/v1/status*    → status-service
+#   https://rpd311.local/v1/feed*      → status-service
+#   https://rpd311.local/v1/stats*     → status-service
+#
+# triage-service has NO ingress rule — ClusterIP only, internal access only.
+#
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: rpd311-ingress-local
+  namespace: rpd311
+  labels:
+    app.kubernetes.io/part-of: rpd311
+    environment: local
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+    nginx.ingress.kubernetes.io/rewrite-target: /$1
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    # Pass traceparent header through — required for Postman Service Graph
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      proxy_set_header traceparent $http_traceparent;
+      proxy_set_header tracestate  $http_tracestate;
+spec:
+  rules:
+    - host: rpd311.local
+      http:
+        paths:
+          # reports-service — submit and manage reports
+          - path: /v1/(reports.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: reports-service
+                port:
+                  name: http
+          # status-service — public read endpoints
+          - path: /v1/(status.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: status-service
+                port:
+                  name: http
+          - path: /v1/(feed.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: status-service
+                port:
+                  name: http
+          - path: /v1/(stats.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: status-service
+                port:
+                  name: http

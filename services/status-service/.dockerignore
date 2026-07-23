@@ -1,0 +1,4 @@
+status-service
+*_test.go
+.env
+.env.*

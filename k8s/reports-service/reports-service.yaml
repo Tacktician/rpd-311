@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: reports-service
+  namespace: rpd311
+  labels:
+    app: reports-service
+    app.kubernetes.io/name: reports-service
+    app.kubernetes.io/part-of: rpd311
+  annotations:
+    # ALB ingress annotations (EKS only — ignored by nginx ingress locally)
+    service.beta.kubernetes.io/aws-load-balancer-type: "external"
+    service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
+spec:
+  type: ClusterIP    # Ingress controller handles external exposure — see ingress.yaml
+  selector:
+    app: reports-service
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP

@@ -1,0 +1,58 @@
+# docker-compose.yml — RPD 311 base dependencies
+#
+# Backing services only (no application containers). These mirror the infrastructure
+# the services expect in-cluster: Postgres (reports + triage), Redis (status cache),
+# and LocalStack S3 (reports attachments).
+#
+# For local app development — exposed ports, app containers, and hot-reload — layer
+# docker-compose.local.yml on top:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
+#
+# Credentials here match k8s/base/secret-local.yaml (rpd311 / changeme).
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: rpd311
+      POSTGRES_PASSWORD: changeme
+      # POSTGRES_DB is intentionally unset — the three databases (reports, triage,
+      # status) are created by the init script below.
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rpd311"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  localstack:
+    # Pinned to the 3.x community line — free S3 emulation, no auth token required.
+    # (The unpinned :latest tag now resolves to a license-gated Pro build.)
+    image: localstack/localstack:3
+    environment:
+      SERVICES: s3
+      DEFAULT_REGION: us-east-1
+      # Bucket matches S3_BUCKET_NAME in secret-local.yaml.
+      S3_BUCKET_NAME: rpd311-attachments
+    volumes:
+      - ./localstack/init:/etc/localstack/init/ready.d:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres-data:

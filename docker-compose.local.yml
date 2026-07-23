@@ -1,0 +1,107 @@
+# docker-compose.local.yml — RPD 311 local dev overrides
+#
+# Layer on top of docker-compose.yml:
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
+#
+# Adds:
+#   - Exposed host ports for the backing services (so tooling/tests can reach them)
+#   - The three application containers, each built from its service directory with
+#     source mounted for hot-reload
+#
+# These containers depend on services/<name>/src/ existing — see "What needs to be
+# built" in CLAUDE.md. Until a service is implemented, run only its dependencies, e.g.:
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up -d postgres redis localstack
+
+services:
+  # --- backing services: expose ports for host access ---
+  postgres:
+    ports:
+      - "5432:5432"
+
+  redis:
+    ports:
+      - "6379:6379"
+
+  localstack:
+    ports:
+      - "4566:4566"
+
+  # --- application containers ---
+  reports-service:
+    build:
+      context: ./services/reports-service
+    # Node 20 native watch — no nodemon needed (keeps the prod image lean).
+    command: ["node", "--watch", "src/index.js"]
+    ports:
+      - "3001:3001"
+    volumes:
+      - ./services/reports-service/src:/app/src
+    environment:
+      PORT: "3001"
+      NODE_ENV: development
+      LOG_LEVEL: debug
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: rpd311
+      POSTGRES_PASSWORD: changeme
+      POSTGRES_DB_REPORTS: reports
+      S3_BUCKET_NAME: rpd311-attachments
+      S3_REGION: us-east-1
+      S3_ENDPOINT_URL: http://localstack:4566
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      SERVICE_TOKEN: changeme-service-token
+      TRIAGE_SERVICE_URL: http://triage-service:3002/v1
+      STATUS_SERVICE_URL: http://status-service:3003/v1
+      TRACEPARENT_PROPAGATION_ENABLED: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+
+  triage-service:
+    build:
+      context: ./services/triage-service
+    command: ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "3002", "--reload"]
+    ports:
+      - "3002:3002"
+    volumes:
+      - ./services/triage-service/src:/app/src
+    environment:
+      PORT: "3002"
+      LOG_LEVEL: debug
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: rpd311
+      POSTGRES_PASSWORD: changeme
+      POSTGRES_DB_TRIAGE: triage
+      SERVICE_TOKEN: changeme-service-token
+      REPORTS_SERVICE_URL: http://reports-service:3001/v1
+      TRACEPARENT_PROPAGATION_ENABLED: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  status-service:
+    build:
+      context: ./services/status-service
+    ports:
+      - "3003:3003"
+    volumes:
+      - ./services/status-service/src:/app/src
+    environment:
+      PORT: "3003"
+      LOG_LEVEL: debug
+      REDIS_URL: redis://redis:6379
+      SERVICE_TOKEN: changeme-service-token
+      REPORTS_SERVICE_URL: http://reports-service:3001/v1
+      TRIAGE_SERVICE_URL: http://triage-service:3002/v1
+      CACHE_TTL_STATUS_SECONDS: "30"
+      CACHE_TTL_FEED_SECONDS: "60"
+      CACHE_TTL_STATS_SECONDS: "300"
+      CACHE_TTL_HEATMAP_SECONDS: "600"
+      TRACEPARENT_PROPAGATION_ENABLED: "true"
+    depends_on:
+      redis:
+        condition: service_healthy

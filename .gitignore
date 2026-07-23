@@ -1,0 +1,39 @@
+# --- Node.js (reports-service) ---
+node_modules/
+services/*/node_modules/
+npm-debug.log*
+yarn-error.log*
+coverage/
+
+# --- Python (triage-service) ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Go (status-service) ---
+services/status-service/status-service
+*.test
+*.out
+
+# --- Environment / secrets ---
+.env
+.env.*
+!.env.example
+
+# --- Local infra state ---
+.localstack/
+pgdata/
+
+# --- Build output ---
+dist/
+build/
+
+# --- Editors / OS ---
+.DS_Store
+*.swp
+.vscode/
+.idea/

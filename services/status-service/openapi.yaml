@@ -1,0 +1,894 @@
+openapi: 3.1.0
+
+info:
+  title: RPD 311 — Status Service
+  version: 1.0.0
+  description: |
+    Public-facing read-only API for the Raccoon City civic incident reporting
+    platform. Exposes report status, city-wide incident statistics, and a
+    paginated public incident feed to residents and third-party consumers.
+
+    This service is intentionally separated from `reports-service` — it is
+    read-only, cache-first, and has different rate-limit and scaling needs
+    from the write path. All data is sourced from `reports-service` and
+    `triage-service` and cached in Redis.
+
+    **No authentication required.** All endpoints are public. Sensitive fields
+    (reporter identity, internal notes, triage routing details) are redacted
+    before caching and never exposed through this service.
+
+    > "For the latest on active incidents in your area, visit rpd311.raccoon.gov
+    > or call the non-emergency line. For zombie-related emergencies, please do
+    > not call the non-emergency line." — Raccoon City Public Affairs Office
+
+    ### Caching strategy
+
+    | Endpoint | Cache TTL | Invalidation |
+    |---|---|---|
+    | `GET /status/{reportId}` | 30 seconds | On `reports-service` status change event |
+    | `GET /feed` | 60 seconds | Rolling TTL, no explicit invalidation |
+    | `GET /stats` | 5 minutes | Rolling TTL, no explicit invalidation |
+    | `GET /stats/by-type` | 5 minutes | Rolling TTL |
+    | `GET /stats/heatmap` | 10 minutes | Rolling TTL |
+
+    ### Service dependencies
+    - **reports-service** — source of truth for report data and status
+    - **triage-service** — source of assignment and routing metadata
+    - **Redis** — cache layer (ElastiCache in production, `redis:7` locally)
+
+  contact:
+    name: Raccoon City Civic Platform Team
+    email: platform@rpd311.raccoon.gov
+  license:
+    name: City of Raccoon City Public API License
+    url: https://rpd311.raccoon.gov/legal
+
+servers:
+  - url: https://api.rpd311.raccoon.gov/v1
+    description: Production (EKS — us-east-1, behind ALB ingress)
+  - url: http://localhost:3003/v1
+    description: Local development
+
+tags:
+  - name: Status
+    description: Public report status lookup
+  - name: Feed
+    description: Public incident feed
+  - name: Stats
+    description: City-wide incident statistics
+  - name: Internal
+    description: Internal cache management endpoints (service-to-service only)
+  - name: Health
+    description: Service health and readiness
+
+paths:
+
+  /status/{reportId}:
+    get:
+      operationId: getReportStatus
+      summary: Get public status for a report
+      description: |
+        Returns the current public status of a submitted incident report.
+        Intended for residents tracking a report they submitted via `reports-service`.
+
+        Response is served from Redis cache (TTL: 30 seconds). On cache miss,
+        status-service fetches from `reports-service` and `triage-service`,
+        assembles the public view, and populates the cache before responding.
+
+        Sensitive fields — reporter identity, internal notes, triage routing
+        details, department assignment specifics — are always redacted.
+      tags: [Status]
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/reportId'
+      responses:
+        '200':
+          description: Report status found
+          headers:
+            X-Cache:
+              description: Whether the response was served from cache
+              schema:
+                type: string
+                enum: [HIT, MISS]
+            X-Cache-Age:
+              description: Age of the cached response in seconds
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublicStatusResponse'
+              examples:
+                submitted:
+                  summary: Report submitted, awaiting triage
+                  value:
+                    reportId: "a3f1c2d4-7e8b-4a9f-b0c1-2d3e4f5a6b7c"
+                    type: NOISE_COMPLAINT
+                    status: SUBMITTED
+                    severity: MEDIUM
+                    location:
+                      lat: 44.7831
+                      lng: -93.2185
+                      address: "1428 Arklay Street, Raccoon City"
+                    submittedAt: "2026-07-22T02:14:00Z"
+                    updatedAt: "2026-07-22T02:14:00Z"
+                    estimatedResponseTime: "3–5 business days"
+                    publicNote: null
+                triaged_critical:
+                  summary: Critical report triaged and escalated
+                  value:
+                    reportId: "b2e3f4a5-8c9d-4b0e-c1f2-3d4e5f6a7b8c"
+                    type: ZOMBIE_SIGHTING
+                    status: ESCALATED
+                    severity: CRITICAL
+                    location:
+                      lat: 44.7891
+                      lng: -93.2251
+                      address: "Raccoon City Main Street, between 3rd and 4th Ave"
+                    submittedAt: "2026-07-22T03:01:00Z"
+                    updatedAt: "2026-07-22T03:01:44Z"
+                    estimatedResponseTime: "Immediate"
+                    publicNote: >
+                      This incident has been escalated to emergency services.
+                      Residents in the affected area are advised to shelter in place.
+                resolved:
+                  summary: Report resolved
+                  value:
+                    reportId: "c3f4a5b6-9d0e-4c1f-d2a3-4e5f6a7b8c9d"
+                    type: POTHOLE
+                    status: RESOLVED
+                    severity: LOW
+                    location:
+                      lat: 44.7744
+                      lng: -93.2133
+                      address: "Corner of Raccoon St and 5th Ave"
+                    submittedAt: "2026-07-20T09:00:00Z"
+                    updatedAt: "2026-07-22T11:30:00Z"
+                    estimatedResponseTime: null
+                    publicNote: "Repair completed by Public Works. Thank you for your report."
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /feed:
+    get:
+      operationId: getIncidentFeed
+      summary: Get public incident feed
+      description: |
+        Returns a paginated feed of recent public incidents across Raccoon City,
+        ordered by `submittedAt` descending. Suitable for powering a public
+        dashboard or third-party integrations.
+
+        Results are served from Redis cache (TTL: 60 seconds).
+
+        Excludes reports with `anonymous: true` from submitter-identifiable
+        fields. Excludes reports in `CLOSED` status. Redacts all sensitive fields.
+
+        Supports filtering by incident type, severity, and location radius.
+        The `since` parameter enables polling integrations to efficiently
+        fetch only new incidents.
+      tags: [Feed]
+      security: []
+      parameters:
+        - name: type
+          in: query
+          description: Filter by incident type
+          schema:
+            $ref: '#/components/schemas/IncidentType'
+        - name: severity
+          in: query
+          description: Filter by severity level
+          schema:
+            $ref: '#/components/schemas/SeverityLevel'
+        - name: status
+          in: query
+          description: Filter by report status (CLOSED excluded regardless)
+          schema:
+            $ref: '#/components/schemas/PublicReportStatus'
+        - name: lat
+          in: query
+          description: Latitude for location radius filter (requires lng and radius)
+          schema:
+            type: number
+            format: float
+            minimum: -90
+            maximum: 90
+        - name: lng
+          in: query
+          description: Longitude for location radius filter (requires lat and radius)
+          schema:
+            type: number
+            format: float
+            minimum: -180
+            maximum: 180
+        - name: radius
+          in: query
+          description: Radius in meters for location filter
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50000
+            default: 5000
+        - name: since
+          in: query
+          description: |
+            Return only incidents submitted after this ISO 8601 timestamp.
+            Useful for polling integrations. Maximum lookback: 7 days.
+          schema:
+            type: string
+            format: date-time
+            example: "2026-07-22T00:00:00Z"
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        '200':
+          description: Incident feed
+          headers:
+            X-Cache:
+              schema:
+                type: string
+                enum: [HIT, MISS]
+            X-Cache-Age:
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FeedResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /stats:
+    get:
+      operationId: getStats
+      summary: Get city-wide incident statistics
+      description: |
+        Returns aggregate incident statistics for Raccoon City. Includes total
+        report counts by status, average resolution times, and a breakdown by
+        incident type.
+
+        Served from Redis cache (TTL: 5 minutes). Suitable for powering a
+        public-facing city dashboard.
+
+        Statistics reflect all non-`CLOSED` reports within the specified time
+        window. Defaults to the trailing 30 days if no window is specified.
+      tags: [Stats]
+      security: []
+      parameters:
+        - name: window
+          in: query
+          description: Time window for statistics aggregation
+          schema:
+            type: string
+            enum: [24h, 7d, 30d, 90d, all]
+            default: 30d
+      responses:
+        '200':
+          description: City-wide statistics
+          headers:
+            X-Cache:
+              schema:
+                type: string
+                enum: [HIT, MISS]
+            X-Cache-Age:
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatsResponse'
+              example:
+                window: 30d
+                generatedAt: "2026-07-22T04:00:00Z"
+                totals:
+                  submitted: 1842
+                  triaged: 1799
+                  inProgress: 234
+                  resolved: 1421
+                  escalated: 87
+                byType:
+                  POTHOLE: 412
+                  DOWNED_TREE: 88
+                  NOISE_COMPLAINT: 631
+                  SUSPICIOUS_PERSON: 204
+                  VANDALISM: 178
+                  CAR_BREAK_IN: 156
+                  ZOMBIE_SIGHTING: 149
+                  UMBRELLA_CORP_ACTIVITY: 24
+                bySeverity:
+                  LOW: 500
+                  MEDIUM: 1013
+                  HIGH: 156
+                  CRITICAL: 173
+                averageResolutionHours:
+                  LOW: 72.4
+                  MEDIUM: 38.1
+                  HIGH: 6.2
+                  CRITICAL: 0.8
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /stats/by-type:
+    get:
+      operationId: getStatsByType
+      summary: Get statistics broken down by incident type
+      description: |
+        Returns per-type statistics including report counts, resolution rates,
+        and average response times. Useful for third-party dashboards that want
+        to display a breakdown without fetching the full `/stats` response.
+
+        Served from Redis cache (TTL: 5 minutes).
+      tags: [Stats]
+      security: []
+      parameters:
+        - name: window
+          in: query
+          schema:
+            type: string
+            enum: [24h, 7d, 30d, 90d, all]
+            default: 30d
+        - name: type
+          in: query
+          description: Filter to a single incident type
+          schema:
+            $ref: '#/components/schemas/IncidentType'
+      responses:
+        '200':
+          description: Per-type statistics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatsByTypeResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /stats/heatmap:
+    get:
+      operationId: getHeatmap
+      summary: Get incident location heatmap data
+      description: |
+        Returns aggregated incident location data suitable for rendering a
+        heatmap on a city map. Each point includes a lat/lng centroid and a
+        weight representing incident density within a ~100m grid cell.
+
+        Served from Redis cache (TTL: 10 minutes). Intentionally coarse —
+        exact incident locations are not returned to protect reporter privacy.
+
+        Supports filtering by incident type and severity. Particularly useful
+        for visualising `ZOMBIE_SIGHTING` cluster patterns during outbreak events.
+      tags: [Stats]
+      security: []
+      parameters:
+        - name: type
+          in: query
+          description: Filter by incident type
+          schema:
+            $ref: '#/components/schemas/IncidentType'
+        - name: severity
+          in: query
+          description: Filter by severity level
+          schema:
+            $ref: '#/components/schemas/SeverityLevel'
+        - name: window
+          in: query
+          schema:
+            type: string
+            enum: [24h, 7d, 30d]
+            default: 7d
+      responses:
+        '200':
+          description: Heatmap data points
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HeatmapResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /internal/cache/invalidate:
+    post:
+      operationId: invalidateCache
+      summary: Invalidate cached status for a report
+      description: |
+        Instructs status-service to evict the cached status entry for the
+        specified report ID from Redis. Called by `reports-service` whenever
+        a report's status changes, ensuring the next public request reflects
+        the updated state within one cache TTL cycle.
+
+        This endpoint is **internal only** and requires a valid service token.
+        It is not reachable via the public ingress.
+      tags: [Internal]
+      security:
+        - serviceToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reportId]
+              properties:
+                reportId:
+                  type: string
+                  format: uuid
+                  description: Report ID whose cache entry should be invalidated
+                  example: "a3f1c2d4-7e8b-4a9f-b0c1-2d3e4f5a6b7c"
+                reason:
+                  type: string
+                  maxLength: 200
+                  description: Optional reason for invalidation (for audit log)
+                  example: "Status updated to RESOLVED by RPD-DISPATCH-001"
+      responses:
+        '200':
+          description: Cache entry invalidated (or was already absent — both return 200)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  reportId:
+                    type: string
+                    format: uuid
+                  evicted:
+                    type: boolean
+                    description: True if an entry was present and evicted; false if already absent
+                  message:
+                    type: string
+                    example: "Cache entry evicted for report a3f1c2d4-7e8b-4a9f-b0c1-2d3e4f5a6b7c"
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /health:
+    get:
+      operationId: healthCheck
+      summary: Health check
+      description: |
+        Returns service health. Called by Kubernetes liveness and readiness
+        probes and by the Postman Insights Agent during service discovery.
+
+        Reports dependency health for Redis, reports-service, and triage-service.
+        A Redis outage degrades to `degraded` (responses still served but cache
+        bypassed). Upstream service outages degrade to `unhealthy`.
+      tags: [Health]
+      security: []
+      responses:
+        '200':
+          description: Service is healthy or degraded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '503':
+          description: Service is unhealthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+components:
+
+  securitySchemes:
+    serviceToken:
+      type: apiKey
+      in: header
+      name: X-Service-Token
+      description: |
+        Internal service-to-service shared secret. Required only on
+        `POST /internal/cache/invalidate`. All other endpoints are public.
+
+  parameters:
+    reportId:
+      name: reportId
+      in: path
+      required: true
+      description: Unique report identifier (UUID v4)
+      schema:
+        type: string
+        format: uuid
+        example: "a3f1c2d4-7e8b-4a9f-b0c1-2d3e4f5a6b7c"
+
+  schemas:
+
+    IncidentType:
+      type: string
+      description: |
+        Incident type. Mirrors the enum defined in reports-service and
+        triage-service — these values must stay in sync across all three specs.
+      enum:
+        - POTHOLE
+        - DOWNED_TREE
+        - NOISE_COMPLAINT
+        - SUSPICIOUS_PERSON
+        - VANDALISM
+        - CAR_BREAK_IN
+        - ZOMBIE_SIGHTING
+        - UMBRELLA_CORP_ACTIVITY
+
+    SeverityLevel:
+      type: string
+      enum:
+        - LOW
+        - MEDIUM
+        - HIGH
+        - CRITICAL
+
+    PublicReportStatus:
+      type: string
+      description: |
+        Public-facing subset of report statuses. Internal statuses (`CLOSED`,
+        and triage-internal states) are mapped to the nearest public equivalent
+        before being cached or returned.
+      enum:
+        - SUBMITTED
+        - IN_PROGRESS
+        - RESOLVED
+        - ESCALATED
+
+    Location:
+      type: object
+      properties:
+        lat:
+          type: number
+          format: float
+          example: 44.7831
+        lng:
+          type: number
+          format: float
+          example: -93.2185
+        address:
+          type: string
+          example: "1428 Arklay Street, Raccoon City"
+
+    PublicStatusResponse:
+      type: object
+      description: |
+        Public view of a report's current status. Sensitive fields are
+        always redacted — this schema contains only what is safe to expose
+        to unauthenticated residents.
+      properties:
+        reportId:
+          type: string
+          format: uuid
+          example: "a3f1c2d4-7e8b-4a9f-b0c1-2d3e4f5a6b7c"
+        type:
+          $ref: '#/components/schemas/IncidentType'
+        status:
+          $ref: '#/components/schemas/PublicReportStatus'
+        severity:
+          $ref: '#/components/schemas/SeverityLevel'
+        location:
+          $ref: '#/components/schemas/Location'
+        submittedAt:
+          type: string
+          format: date-time
+          example: "2026-07-22T02:14:00Z"
+        updatedAt:
+          type: string
+          format: date-time
+          example: "2026-07-22T02:26:00Z"
+        estimatedResponseTime:
+          type: string
+          nullable: true
+          description: |
+            Human-readable estimated response time based on severity and current
+            queue depth. Null once the report is resolved or closed.
+          example: "3–5 business days"
+        publicNote:
+          type: string
+          nullable: true
+          description: |
+            Optional public-facing note from the responding department.
+            Set by `reports-service` on status update; surfaced here as-is.
+          example: "This incident has been escalated to emergency services. Residents in the affected area are advised to shelter in place."
+
+    FeedItem:
+      type: object
+      description: A single incident in the public feed. Subset of PublicStatusResponse.
+      properties:
+        reportId:
+          type: string
+          format: uuid
+        type:
+          $ref: '#/components/schemas/IncidentType'
+        status:
+          $ref: '#/components/schemas/PublicReportStatus'
+        severity:
+          $ref: '#/components/schemas/SeverityLevel'
+        location:
+          $ref: '#/components/schemas/Location'
+        submittedAt:
+          type: string
+          format: date-time
+        publicNote:
+          type: string
+          nullable: true
+
+    FeedResponse:
+      type: object
+      properties:
+        incidents:
+          type: array
+          items:
+            $ref: '#/components/schemas/FeedItem'
+        total:
+          type: integer
+          description: Total matching incidents (for pagination)
+          example: 312
+        limit:
+          type: integer
+          example: 20
+        offset:
+          type: integer
+          example: 0
+        oldestAt:
+          type: string
+          format: date-time
+          description: Timestamp of the oldest incident in this response page
+          example: "2026-07-22T01:00:00Z"
+        newestAt:
+          type: string
+          format: date-time
+          description: Timestamp of the newest incident in this response page
+          example: "2026-07-22T04:14:00Z"
+
+    StatsResponse:
+      type: object
+      properties:
+        window:
+          type: string
+          enum: [24h, 7d, 30d, 90d, all]
+          example: 30d
+        generatedAt:
+          type: string
+          format: date-time
+        totals:
+          type: object
+          properties:
+            submitted:
+              type: integer
+            triaged:
+              type: integer
+            inProgress:
+              type: integer
+            resolved:
+              type: integer
+            escalated:
+              type: integer
+        byType:
+          type: object
+          description: Incident count keyed by IncidentType
+          additionalProperties:
+            type: integer
+          example:
+            POTHOLE: 412
+            ZOMBIE_SIGHTING: 149
+            UMBRELLA_CORP_ACTIVITY: 24
+        bySeverity:
+          type: object
+          additionalProperties:
+            type: integer
+          example:
+            LOW: 500
+            CRITICAL: 173
+        averageResolutionHours:
+          type: object
+          description: Average hours to resolution keyed by SeverityLevel
+          additionalProperties:
+            type: number
+            format: float
+          example:
+            LOW: 72.4
+            CRITICAL: 0.8
+
+    StatsByTypeResponse:
+      type: object
+      properties:
+        window:
+          type: string
+          enum: [24h, 7d, 30d, 90d, all]
+        generatedAt:
+          type: string
+          format: date-time
+        types:
+          type: array
+          items:
+            type: object
+            properties:
+              type:
+                $ref: '#/components/schemas/IncidentType'
+              total:
+                type: integer
+                example: 149
+              resolved:
+                type: integer
+                example: 112
+              resolutionRatePct:
+                type: number
+                format: float
+                description: Percentage of reports resolved within the window
+                example: 75.2
+              averageResolutionHours:
+                type: number
+                format: float
+                example: 0.8
+              bySeverity:
+                type: object
+                additionalProperties:
+                  type: integer
+
+    HeatmapResponse:
+      type: object
+      properties:
+        window:
+          type: string
+          enum: [24h, 7d, 30d]
+        generatedAt:
+          type: string
+          format: date-time
+        points:
+          type: array
+          description: |
+            Aggregated location points for heatmap rendering. Each point
+            represents a ~100m grid cell centroid. Exact report locations
+            are not exposed.
+          items:
+            type: object
+            required: [lat, lng, weight]
+            properties:
+              lat:
+                type: number
+                format: float
+                description: Grid cell centroid latitude
+                example: 44.7835
+              lng:
+                type: number
+                format: float
+                description: Grid cell centroid longitude
+                example: -93.2190
+              weight:
+                type: integer
+                description: Number of incidents in this grid cell
+                example: 7
+              dominantType:
+                $ref: '#/components/schemas/IncidentType'
+                description: Most common incident type in this cell
+              dominantSeverity:
+                $ref: '#/components/schemas/SeverityLevel'
+                description: Highest severity incident in this cell
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [healthy, degraded, unhealthy]
+          example: healthy
+        service:
+          type: string
+          example: status-service
+        version:
+          type: string
+          example: "1.0.0"
+        timestamp:
+          type: string
+          format: date-time
+        dependencies:
+          type: object
+          properties:
+            redis:
+              type: string
+              enum: [healthy, unhealthy]
+              description: Redis outage degrades to cache-bypass mode, not full unhealthy
+              example: healthy
+            reportsService:
+              type: string
+              enum: [healthy, unhealthy, unknown]
+              example: healthy
+            triageService:
+              type: string
+              enum: [healthy, unhealthy, unknown]
+              example: healthy
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+          example: "NOT_FOUND"
+        message:
+          type: string
+          example: "No report found with ID a3f1c2d4-7e8b-4a9f-b0c1-2d3e4f5a6b7c."
+        requestId:
+          type: string
+          format: uuid
+
+  responses:
+    BadRequest:
+      description: Bad request — invalid parameters
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Unauthorized:
+      description: Missing or invalid service token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFound:
+      description: Report not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    TooManyRequests:
+      description: Rate limit exceeded
+      headers:
+        Retry-After:
+          description: Seconds to wait before retrying
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: RATE_LIMITED
+            message: "Too many requests. Please wait before retrying."
+    InternalServerError:
+      description: Unexpected server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    ServiceUnavailable:
+      description: |
+        Upstream dependency unavailable. May occur during reports-service or
+        triage-service outages when a cache miss cannot be resolved.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: UPSTREAM_UNAVAILABLE
+            message: "Unable to retrieve report status. reports-service is currently unavailable. Please try again shortly."

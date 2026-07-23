@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: rpd311
+  labels:
+    app.kubernetes.io/managed-by: kubectl
+    app.kubernetes.io/part-of: rpd311
+    environment: demo
+    # Label required for Postman Insights Agent namespace scoping.
+    # The agent is configured to watch this namespace only.
+    postman.com/monitored: "true"
