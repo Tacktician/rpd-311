@@ -1,0 +1,39 @@
+# docker-compose.ci.yml — CI-only build-cache overrides (GitHub Actions).
+#
+# Layered on top of docker-compose.yml + docker-compose.local.yml in the CI
+# `integration` job ONLY, to give the compose image builds GitHub Actions layer
+# caching (type=gha). Restoring the dependency-install layers (npm ci / pip install /
+# go mod) is where the build time goes.
+#
+# This cache backend ONLY works inside GitHub Actions — do NOT layer this file for
+# local development. Local `docker compose build` uses the two base files unchanged;
+# adding type=gha locally would fail trying to reach the Actions cache service.
+#
+# The `integration` job must also: set up buildx (docker/setup-buildx-action), expose
+# the Actions runtime token (crazy-max/ghaction-github-runtime), and set
+# COMPOSE_BAKE=true so compose delegates builds to `buildx bake`, which honors cache_to.
+#
+# Distinct scope per service so the three image caches don't overwrite one another.
+# These scopes match the docker-build job, so that job warms the same cache.
+
+services:
+  reports-service:
+    build:
+      cache_from:
+        - type=gha,scope=reports-service
+      cache_to:
+        - type=gha,scope=reports-service,mode=max
+
+  triage-service:
+    build:
+      cache_from:
+        - type=gha,scope=triage-service
+      cache_to:
+        - type=gha,scope=triage-service,mode=max
+
+  status-service:
+    build:
+      cache_from:
+        - type=gha,scope=status-service
+      cache_to:
+        - type=gha,scope=status-service,mode=max

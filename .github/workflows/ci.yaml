@@ -87,8 +87,11 @@ jobs:
           context: services/${{ matrix.service }}
           push: false
           tags: rpd311/${{ matrix.service }}:ci-${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Per-service scope: keeps the three matrix legs from overwriting one shared
+          # cache, and matches docker-compose.ci.yml so this job warms the integration
+          # job's compose build cache.
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
 
   # --- Cross-service integration tests: bring the whole stack up, drive the real
   #     reports→triage→status flow, assert the seams (e2e/test_flow.py) ---
@@ -103,8 +106,20 @@ jobs:
           cache: pip
           cache-dependency-path: e2e/requirements.txt
 
+      # Buildx + the Actions runtime token so the compose build can read/write the
+      # type=gha layer cache defined in docker-compose.ci.yml.
+      - uses: docker/setup-buildx-action@v3
+      - uses: crazy-max/ghaction-github-runtime@v3
+
       - name: Start the full stack
-        run: docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
+        env:
+          COMPOSE_BAKE: "true" # delegate compose builds to buildx bake so cache_to is honored
+        run: >
+          docker compose
+          -f docker-compose.yml
+          -f docker-compose.local.yml
+          -f docker-compose.ci.yml
+          up -d --build
 
       - name: Run integration tests
         working-directory: e2e
