@@ -87,8 +87,10 @@ jobs:
           context: services/${{ matrix.service }}
           push: false
           tags: rpd311/${{ matrix.service }}:ci-${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Scope the cache per service, otherwise the three matrix legs share one
+          # gha cache scope and overwrite each other's layers every run.
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
 
   # --- Cross-service integration tests: bring the whole stack up, drive the real
   #     reports→triage→status flow, assert the seams (e2e/test_flow.py) ---
