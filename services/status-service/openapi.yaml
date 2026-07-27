@@ -34,7 +34,7 @@ info:
     ### Service dependencies
     - **reports-service** — source of truth for report data and status
     - **triage-service** — source of assignment and routing metadata
-    - **Redis** — cache layer (ElastiCache in production, `redis:7` locally)
+    - **Redis** — cache layer (`redis:7`)
 
   contact:
     name: Raccoon City Civic Platform Team
@@ -45,7 +45,7 @@ info:
 
 servers:
   - url: https://api.rpd311.raccoon.gov/v1
-    description: Production (EKS — us-east-1, behind ALB ingress)
+    description: Production
   - url: http://localhost:3003/v1
     description: Local development
 

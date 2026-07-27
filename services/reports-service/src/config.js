@@ -19,7 +19,8 @@ export const config = {
   s3: {
     bucket: process.env.S3_BUCKET_NAME ?? 'rpd311-attachments',
     region: process.env.S3_REGION ?? 'us-east-1',
-    // Present locally (LocalStack), omitted in EKS so the SDK targets real S3.
+    // Points at LocalStack (e.g. http://localstack:4566). The AWS SDK requires a
+    // region even though LocalStack ignores it.
     endpoint: process.env.S3_ENDPOINT_URL || undefined,
     presignExpirySeconds: 24 * 60 * 60, // 24 hours, per the OpenAPI spec
   },

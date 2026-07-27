@@ -42,8 +42,7 @@ Cluster Watcher discovers it. This is the core demo moment for Lessons 6 and 7.
 rpd311/
 ├── .github/
 │   └── workflows/
-│       ├── ci.yaml                         # lint, test, build, push to ECR
-│       └── deploy.yaml                     # kubectl apply on merge to main
+│       └── ci.yaml                         # lint, test, build images, integration tests
 │
 ├── services/
 │   ├── reports-service/
@@ -66,8 +65,7 @@ rpd311/
 │   ├── base/
 │   │   ├── namespace.yaml
 │   │   ├── configmap-common.yaml
-│   │   ├── secret-local.yaml               # local dev only
-│   │   └── external-secret-eso.yaml        # EKS only (ESO + Secrets Manager)
+│   │   └── secret-local.yaml               # K8s Secret for the demo cluster
 │   ├── reports-service/
 │   │   ├── reports-deployment.yaml
 │   │   ├── reports-service.yaml
@@ -79,8 +77,7 @@ rpd311/
 │   │   ├── status-deployment.yaml
 │   │   └── status-service.yaml
 │   └── ingress/
-│       ├── ingress-local.yaml              # nginx (minikube / kind)
-│       └── ingress-eks.yaml               # ALB (EKS)
+│       └── ingress-local.yaml              # nginx (minikube / kind)
 │
 ├── docker-compose.yml                      # base services (Postgres, Redis, LocalStack)
 ├── docker-compose.local.yml               # local overrides (ports, volumes, hot-reload)
@@ -91,21 +88,12 @@ rpd311/
 
 ## Prerequisites
 
-### Local development
 - Docker + Docker Compose
 - minikube or kind
 - kubectl
 - Node.js 20+ (reports-service)
 - Python 3.12+ (triage-service)
 - Go 1.22+ (status-service)
-
-### EKS demo environment
-- AWS CLI configured
-- EKS cluster v1.19+ provisioned
-- AWS Load Balancer Controller installed
-- External Secrets Operator installed
-- ECR repositories created
-- Secrets provisioned in AWS Secrets Manager (see `k8s/base/external-secret-eso.yaml`)
 
 ---
 
@@ -166,9 +154,10 @@ OpenAPI specs are co-located with each service in `services/<name>/openapi.yaml`
 Point Postman Code Discovery at this repository — it will find all three specs automatically.
 
 ### Insights Agent (Lesson 6)
-After deploying to EKS, install the Postman Insights Agent in Discovery Mode.
-All three services — including `triage-service`, which has no public URL — will
-appear in API Catalog.
+After deploying the app to the minikube / kind cluster, install the Postman Insights
+Agent in Discovery Mode. The agent reports outbound to Postman's cloud, so no public
+ingress is required. All three services — including `triage-service`, which has no
+public URL — will appear in API Catalog.
 
 See `k8s/README.md` for installation steps.
 
@@ -187,7 +176,8 @@ This is required for the Service Graph on the API Catalog Overview tab to
 show dependency edges between services.
 
 `TRACEPARENT_PROPAGATION_ENABLED=true` is set in `k8s/base/configmap-common.yaml`.
-Both ingress configurations forward `traceparent` and `tracestate` from inbound requests.
+The nginx ingress forwards `traceparent` and `tracestate` from inbound requests, and
+each service originates a trace when the inbound request carries none.
 
 ---
 

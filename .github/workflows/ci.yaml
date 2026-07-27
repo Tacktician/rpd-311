@@ -69,13 +69,11 @@ jobs:
       - run: go test ./src/...
       - run: go build -o /tmp/status-service ./src/...
 
-  # --- Build all three images; push to ECR only on main when AWS is configured ---
+  # --- Build all three images to validate the Dockerfiles (build-only; never pushed).
+  #     Local runs load these into minikube with `minikube image load` — see README. ---
   docker-build:
     needs: [reports-service, triage-service, status-service]
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write # for AWS OIDC (only used when pushing)
     strategy:
       matrix:
         service: [reports-service, triage-service, status-service]
@@ -83,47 +81,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
 
-      - name: Decide whether to push
-        id: meta
-        run: |
-          push=false
-          if [ "${{ github.event_name }}" = "push" ] && \
-             [ "${{ github.ref }}" = "refs/heads/main" ] && \
-             [ -n "${{ vars.AWS_ROLE_ARN }}" ]; then
-            push=true
-          fi
-          echo "push=$push" >>"$GITHUB_OUTPUT"
-
-      - name: Configure AWS credentials
-        id: aws
-        if: steps.meta.outputs.push == 'true'
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
-
-      - name: Log in to Amazon ECR
-        id: ecr
-        if: steps.meta.outputs.push == 'true'
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Compute image tags
-        id: tags
-        run: |
-          if [ "${{ steps.meta.outputs.push }}" = "true" ]; then
-            reg="${{ steps.ecr.outputs.registry }}"
-            echo "value=${reg}/rpd311/${{ matrix.service }}:${{ github.sha }},${reg}/rpd311/${{ matrix.service }}:latest" >>"$GITHUB_OUTPUT"
-          else
-            # Build-only validation tag (never pushed).
-            echo "value=rpd311/${{ matrix.service }}:ci-${{ github.sha }}" >>"$GITHUB_OUTPUT"
-          fi
-
-      - name: Build and (conditionally) push
+      - name: Build image
         uses: docker/build-push-action@v6
         with:
           context: services/${{ matrix.service }}
-          push: ${{ steps.meta.outputs.push == 'true' }}
-          tags: ${{ steps.tags.outputs.value }}
+          push: false
+          tags: rpd311/${{ matrix.service }}:ci-${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

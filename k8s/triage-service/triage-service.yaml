@@ -5,7 +5,7 @@
 #   http://triage-service.rpd311.svc.cluster.local/v1
 #
 # From outside the cluster, triage-service is invisible — no public URL,
-# no ALB listener, no ingress rule. It will not appear in Postman API Catalog
+# no ingress rule. It will not appear in Postman API Catalog
 # until the Insights Agent (Lesson 6) or Cluster Watcher (Lesson 7) discovers it.
 # This is the core demo moment for both lessons.
 #

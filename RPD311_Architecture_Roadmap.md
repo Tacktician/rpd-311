@@ -141,15 +141,12 @@ rpd311/
 │       ├── deployment.yaml
 │       ├── service.yaml
 │       └── configmap.yaml
-├── infra/
-│   ├── eks/                  ← EKS cluster config (Terraform or eksctl)
-│   ├── rds/                  ← Postgres instance config
-│   ├── s3/                   ← Attachment bucket config
-│   └── redis/                ← ElastiCache config
+├── k8s/dev/
+│   └── datastores.yaml       ← In-cluster Postgres + Redis + LocalStack (S3) for minikube
 ├── docker-compose.yml        ← Local dev (LocalStack for S3, Postgres + Redis containers)
 ├── .github/
 │   └── workflows/
-│       └── ci.yaml           ← Lint, test, build, push to ECR
+│       └── ci.yaml           ← Lint, test, build images, integration tests
 └── README.md
 ```
 
@@ -169,33 +166,28 @@ No full distributed tracing stack (Jaeger, Zipkin) required for the demo — jus
 
 ---
 
-## Infrastructure: local dev vs. EKS demo
+## Infrastructure: local minikube / kind
 
-### Local development (`docker-compose`)
+The app runs entirely on a local Kubernetes cluster — no cloud provider is required.
+This keeps the demo cloud-agnostic and focused on Postman API Catalog rather than any
+one deployment target.
 
 | Component | Local equivalent |
 |---|---|
-| Postgres (reports, triage) | `postgres:15` container |
-| Redis (status cache) | `redis:7` container |
+| Postgres (reports, triage) | `postgres:15` container / in-cluster (`k8s/dev/datastores.yaml`) |
+| Redis (status cache) | `redis:7` container / in-cluster |
 | S3 (attachments) | LocalStack `s3` |
 | K8s | `minikube` or `kind` |
 | Ingress | nginx ingress controller (minikube addon) |
+| Container images | built locally, loaded with `minikube image load` (no registry) |
 
-Local dev requires no AWS credentials. `docker-compose up` brings all dependencies online. K8s manifests can be applied to `minikube` for a full local cluster test before EKS.
+No AWS credentials are needed. `docker-compose up` brings all dependencies online for
+service development; `k8s/dev/datastores.yaml` provides the same datastores in-cluster
+for a full minikube run.
 
-### EKS demo environment (recorded lessons)
-
-| Component | AWS service |
-|---|---|
-| K8s cluster | EKS (v1.24+, satisfies v1.19+ requirement) |
-| Container registry | ECR |
-| Postgres | RDS (Postgres 15, one instance, three databases) |
-| Redis | ElastiCache (single-node, `cache.t3.micro`) |
-| S3 | S3 standard bucket (`rpd311-attachments-demo`) |
-| Ingress | AWS Load Balancer Controller (ALB) |
-| Secrets | AWS Secrets Manager → K8s External Secrets Operator |
-
-EKS is the environment used for recording Lessons 6 and 7. Coordinate with engineering to provision the cluster before demo recording begins.
+Lessons 6 and 7 (Insights Agent, Cluster Watcher) run against this local cluster —
+both agents report **outbound** to Postman's cloud, so no public ingress or managed
+cloud cluster is required.
 
 ---
 
@@ -242,16 +234,19 @@ kubectl create namespace rpd311
 | **4 — triage-service** | Implement routing logic; wire to reports-service webhook; Postgres assignments table | Local | — |
 | **5 — status-service** | Implement read endpoints; Redis cache layer; aggregate from reports + triage | Local | — |
 | **6 — K8s local** | Write all manifests; deploy to minikube; verify service-to-service calls work in cluster | minikube / kind | — |
-| **7 — CI pipeline** | GitHub Actions: lint → test → build → push to ECR | GitHub + ECR | — |
-| **8 — EKS provisioning** | Coordinate with engineering; provision EKS cluster, RDS, ElastiCache, S3, ALB | AWS | **Lessons 6–7 blocker** |
-| **9 — EKS deploy** | Deploy all services to EKS; verify traceparent propagation; verify Insights Agent discovery | EKS | Lesson 6 |
-| **10 — Demo recording** | Record Insights Agent (L6) and Cluster Watcher (L7) walkthroughs | EKS | Lessons 6–7 |
+| **7 — CI pipeline** | GitHub Actions: lint → test → build images → integration tests | GitHub | — |
+| **8 — Insights Agent (L6)** | Install the Insights Agent in the cluster; drive traffic; verify discovery of all three services (incl. triage) | minikube / kind | Lesson 6 |
+| **9 — Cluster Watcher (L7)** | Install the Cluster Watcher; verify deployment metadata (commit/branch/namespace) | minikube / kind | Lesson 7 |
+| **10 — Demo recording** | Record Insights Agent (L6) and Cluster Watcher (L7) walkthroughs | minikube / kind | Lessons 6–7 |
 
 ---
 
 ## Blockers
 
-**EKS environment (Phases 8–10):** Same blocker documented in the course outline. Do not attempt demo recording until the cluster is provisioned and stable. Lessons 6 and 7 remain gated on this.
+**Discovery-demo manifests (Phases 8–10):** The Insights Agent DaemonSet and Cluster
+Watcher CRD/controller manifests are not yet in the repo (the Lesson 6/7 sections in
+`k8s/README.md` reference them as placeholders). These need to be added and validated
+against the minikube cluster before demo recording. The agents require a `POSTMAN_API_KEY`.
 
 **triage-service routing confirmation:** The routing logic above is draft. Confirm department queue names and escalation rules with the course author before finalizing the OpenAPI spec — the enum values and routing table appear in lesson prose.
 
@@ -264,7 +259,7 @@ kubectl create namespace rpd311
 1. **OpenAPI specs** — draft all three specs (incident type enum is the fun part)
 2. **K8s manifests** — `Deployment`, `Service`, `ConfigMap`, `Secret` for each service in the `rpd311` namespace
 3. **`docker-compose.yml`** — local dev environment with all dependencies
-4. **CI pipeline** — GitHub Actions workflow for build and ECR push
+4. **CI pipeline** — GitHub Actions workflow for lint, test, image build, and integration tests
 
 ---
 

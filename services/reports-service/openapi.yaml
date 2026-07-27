@@ -25,7 +25,7 @@ info:
 
 servers:
   - url: https://api.rpd311.raccoon.gov/v1
-    description: Production (EKS — us-east-1)
+    description: Production
   - url: http://localhost:3001/v1
     description: Local development
 
@@ -603,7 +603,7 @@ components:
           type: string
           format: uri
           description: Pre-signed S3 URL (valid for 24 hours)
-          example: "https://rpd311-attachments.s3.amazonaws.com/..."
+          example: "http://localstack:4566/rpd311-attachments/..."
         uploadedAt:
           type: string
           format: date-time

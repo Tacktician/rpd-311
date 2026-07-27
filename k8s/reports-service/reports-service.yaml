@@ -7,12 +7,8 @@ metadata:
     app: reports-service
     app.kubernetes.io/name: reports-service
     app.kubernetes.io/part-of: rpd311
-  annotations:
-    # ALB ingress annotations (EKS only — ignored by nginx ingress locally)
-    service.beta.kubernetes.io/aws-load-balancer-type: "external"
-    service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
 spec:
-  type: ClusterIP    # Ingress controller handles external exposure — see ingress.yaml
+  type: ClusterIP    # nginx ingress handles external exposure — see ingress/ingress-local.yaml
   selector:
     app: reports-service
   ports:

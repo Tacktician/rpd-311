@@ -40,7 +40,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: triage-service
-          # TODO: replace with your ECR image URI before deploying to EKS
+          # Built locally and loaded into minikube: `minikube image load rpd311/triage-service:1.0.0`
           image: rpd311/triage-service:1.0.0
           imagePullPolicy: IfNotPresent
           ports:

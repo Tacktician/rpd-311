@@ -1,7 +1,7 @@
 # RPD 311 — Kubernetes Manifests
 
 Kubernetes manifests for the RPD 311 demo application.
-Three services, one namespace (`rpd311`), two environments (local + EKS).
+Three services, one namespace (`rpd311`), running on a local minikube / kind cluster.
 
 ---
 
@@ -12,8 +12,9 @@ rpd311-k8s/
 ├── base/
 │   ├── namespace.yaml              — rpd311 namespace
 │   ├── configmap-common.yaml       — shared env vars (service URLs, tracing config)
-│   ├── secret-local.yaml           — K8s Secret for local dev (base64 placeholders)
-│   └── external-secret-eso.yaml    — ESO ExternalSecret + SecretStore for EKS
+│   └── secret-local.yaml           — K8s Secret for the demo cluster (base64 placeholders)
+├── dev/
+│   └── datastores.yaml             — in-cluster Postgres, Redis, LocalStack (S3)
 ├── reports-service/
 │   ├── reports-deployment.yaml     — 2 replicas, rolling update, security context
 │   ├── reports-service.yaml        — ClusterIP (ingress handles external access)
@@ -25,18 +26,18 @@ rpd311-k8s/
 │   ├── status-deployment.yaml      — 2 replicas, lighter resource profile
 │   └── status-service.yaml         — ClusterIP (ingress handles external access)
 └── ingress/
-    ├── ingress-local.yaml          — nginx ingress for minikube / kind
-    └── ingress-eks.yaml            — AWS Load Balancer Controller (ALB) for EKS
+    └── ingress-local.yaml          — nginx ingress for minikube / kind
 ```
 
 ---
 
-## Local development (minikube / kind)
+## Deploying to minikube / kind
 
 ### Prerequisites
 - minikube or kind installed
 - kubectl configured
 - metrics-server enabled (for HPA)
+- The three service images built and loaded into the cluster (see below)
 
 ### 1. Start the cluster
 
@@ -51,7 +52,19 @@ kind create cluster --name rpd311
 kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml
 ```
 
-### 2. Add /etc/hosts entry
+### 2. Build and load the service images
+
+Deployments use `imagePullPolicy: IfNotPresent` with local tags (`rpd311/<svc>:1.0.0`),
+so the images must exist in the cluster's node — there is no registry.
+
+```bash
+for svc in reports-service triage-service status-service; do
+  docker build -t "rpd311/$svc:1.0.0" "services/$svc"
+  minikube image load "rpd311/$svc:1.0.0"   # kind: kind load docker-image "rpd311/$svc:1.0.0" --name rpd311
+done
+```
+
+### 3. Add /etc/hosts entry
 
 ```bash
 # minikube
@@ -61,16 +74,19 @@ echo "$(minikube ip)  rpd311.local" | sudo tee -a /etc/hosts
 echo "127.0.0.1  rpd311.local" | sudo tee -a /etc/hosts
 ```
 
-### 3. Apply manifests
+### 4. Apply manifests
 
 ```bash
-# Base (namespace, configmap, secrets)
+# Base (namespace, configmap, secret)
 kubectl apply -f base/namespace.yaml
 kubectl apply -f base/configmap-common.yaml
 
 # Edit base/secret-local.yaml — replace base64 placeholder values
 # then apply:
 kubectl apply -f base/secret-local.yaml
+
+# In-cluster datastores (Postgres, Redis, LocalStack)
+kubectl apply -f dev/datastores.yaml
 
 # Services
 kubectl apply -f reports-service/
@@ -81,16 +97,19 @@ kubectl apply -f status-service/
 kubectl apply -f ingress/ingress-local.yaml
 ```
 
-### 4. Verify
+### 5. Verify
 
 ```bash
 kubectl get pods -n rpd311
 kubectl get svc -n rpd311
 kubectl get ingress -n rpd311
 
-# Health checks
-curl http://rpd311.local/v1/reports/health  # → reports-service
-curl http://rpd311.local/v1/status/health   # → status-service
+# On the macOS docker driver the ingress isn't directly routable — port-forward it:
+kubectl -n ingress-nginx port-forward svc/ingress-nginx-controller 18080:80 &
+
+# Health checks (Host header selects the ingress rule)
+curl -H 'Host: rpd311.local' http://localhost:18080/v1/reports/health  # → reports-service
+curl -H 'Host: rpd311.local' http://localhost:18080/v1/status/health   # → status-service
 
 # triage-service is only reachable inside the cluster
 kubectl run curl-test --image=curlimages/curl -it --rm -n rpd311 -- \
@@ -99,92 +118,36 @@ kubectl run curl-test --image=curlimages/curl -it --rm -n rpd311 -- \
 
 ---
 
-## EKS deployment
-
-### Prerequisites
-- EKS cluster v1.19+ provisioned and kubectl configured
-- AWS Load Balancer Controller installed
-- External Secrets Operator installed
-- ACM certificate issued for your demo domain
-- Secrets created in AWS Secrets Manager (see `base/external-secret-eso.yaml`)
-- ECR repositories created and images pushed
-
-### 1. Update TODOs
-
-Before applying, update the following placeholders:
-
-| File | Field | Replace with |
-|---|---|---|
-| `base/external-secret-eso.yaml` | `ACCOUNT_ID` | Your AWS account ID |
-| `base/external-secret-eso.yaml` | IRSA role ARN | Your ESO IRSA role ARN |
-| `ingress/ingress-eks.yaml` | `ACCOUNT_ID`, `CERTIFICATE_ID` | Your ACM cert ARN |
-| `ingress/ingress-eks.yaml` | `api.rpd311.raccoon.gov` | Your demo domain |
-| All `deployment.yaml` files | `image:` | Your ECR image URIs |
-
-### 2. Apply manifests
-
-```bash
-# Base
-kubectl apply -f base/namespace.yaml
-kubectl apply -f base/configmap-common.yaml
-kubectl apply -f base/external-secret-eso.yaml   # ESO syncs secrets from Secrets Manager
-
-# Wait for ESO to sync the secret
-kubectl get secret rpd311-secrets -n rpd311
-
-# Services
-kubectl apply -f reports-service/
-kubectl apply -f triage-service/
-kubectl apply -f status-service/
-
-# Ingress (ALB — takes ~2 minutes to provision)
-kubectl apply -f ingress/ingress-eks.yaml
-kubectl get ingress -n rpd311 --watch
-```
-
-### 3. Verify
-
-```bash
-kubectl get pods -n rpd311
-kubectl get hpa -n rpd311
-
-# ALB hostname (after ingress provisioned)
-kubectl get ingress rpd311-ingress-eks -n rpd311 -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
-
-# Health checks (replace with your domain)
-curl https://api.rpd311.raccoon.gov/v1/reports/health
-curl https://api.rpd311.raccoon.gov/v1/status/health
-```
-
----
-
 ## Postman Insights Agent (Lesson 6)
 
-After EKS deployment, install the Insights Agent in Discovery Mode:
+Once the app is running in the cluster, install the Insights Agent in Discovery Mode.
+The agent observes traffic in-cluster and reports **outbound** to Postman's cloud, so
+it works on minikube / kind without any public ingress.
 
 ```bash
-# Create namespace and secret
+# Create namespace and provide your Postman API key
 kubectl create namespace postman-insights-namespace
 kubectl create secret generic postman-agent-secrets \
-  --from-literal=POSTMAN_API_KEY=$(kubectl get secret rpd311-secrets -n rpd311 \
-    -o jsonpath='{.data.POSTMAN_API_KEY}' | base64 -d) \
+  --from-literal=POSTMAN_API_KEY=<your-postman-api-key> \
   -n postman-insights-namespace
 
-# Apply DaemonSet (see Lesson 6 for manifest and flag details)
+# Apply the Insights Agent DaemonSet (see Lesson 6 for the manifest and flag details)
 # kubectl apply -f postman-insights-agent-daemonset.yaml
 ```
 
-After discovery, all three services — including `triage-service` (ClusterIP only,
-no public URL) — will appear in Postman API Catalog.
+Drive traffic through the flow (e.g. `e2e/generate_traffic.py`) so the agent has calls
+to observe. After discovery, all three services — including `triage-service` (ClusterIP
+only, no public URL) — will appear in Postman API Catalog.
 
 ---
 
 ## Cluster Watcher (Lesson 7)
 
-After EKS deployment, install the Cluster Watcher CRD:
+Install the Cluster Watcher to surface deployment metadata. Like the Insights Agent it
+reads the cluster and reports outbound, so it runs on minikube / kind.
 
 ```bash
-# See Lesson 7 for CRD installation command and source
+# See Lesson 7 for the CRD / controller installation command and source
 # kubectl apply -f cluster-watcher-crd.yaml
 ```
 
@@ -197,8 +160,8 @@ deployments appear with Git commit, branch, and namespace metadata.
 
 | Service | K8s Service type | Ingress rule | Discoverable without agent? |
 |---|---|---|---|
-| reports-service | ClusterIP | Yes (public) | Yes — via ALB |
-| status-service | ClusterIP | Yes (public) | Yes — via ALB |
+| reports-service | ClusterIP | Yes (public) | Yes — via ingress |
+| status-service | ClusterIP | Yes (public) | Yes — via ingress |
 | triage-service | ClusterIP | **No** | **No — agent required** |
 
 `triage-service` is the demo's key teaching moment: a real, running service
@@ -211,8 +174,8 @@ Cluster Watcher discovers it.
 
 All three services must propagate `traceparent` headers on outbound calls.
 `TRACEPARENT_PROPAGATION_ENABLED=true` is set in `configmap-common.yaml`.
-The nginx and ALB ingress configs are both set to forward `traceparent` and
-`tracestate` headers from inbound requests.
+The nginx ingress forwards `traceparent` and `tracestate` headers from inbound
+requests, and each service originates a trace when the inbound request has none.
 
 Without `traceparent` propagation, `triage-service` will appear in the catalog
 after discovery but the Service Graph on the Overview tab will not show
