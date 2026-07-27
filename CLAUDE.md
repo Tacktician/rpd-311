@@ -76,19 +76,20 @@ All three services are now implemented and verified end-to-end via docker-compos
 (build → submit → triage callback → acknowledge → public status/feed/stats/heatmap →
 S3 attachment upload). CI/CD is wired up in `.github/workflows/`:
 - **ci.yaml** (push/PR to main): per-service unit test + lint (Node `npm test`; Python
-  `pytest`; Go `gofmt`/`vet`/`test`/`build`), a docker build of all three images, and an
+  `pytest`; Go `gofmt`/`vet`/`test`/`build`), a build-only docker build of all three
+  images (validates the Dockerfiles; images are never pushed to a registry), and an
   **`integration` job** that boots the full compose stack and runs the cross-service
-  E2E suite. ECR push activates only on `main` when the `AWS_ROLE_ARN` repo variable is
-  set — otherwise build-only, so CI is green with no secrets configured.
+  E2E suite. No cloud credentials or secrets are required — CI is green out of the box.
 - **`e2e/`** — one HTTP harness, two jobs: `test_flow.py` (integration tests over the
   live reports→triage→status flow + real Postgres/Redis/LocalStack, run by CI) and
   `generate_traffic.py` (same flows on a loop, to feed the Insights Agent a connected
   Service Graph). Config via `REPORTS_URL`/`TRIAGE_URL`/`STATUS_URL`/`SERVICE_TOKEN`
   env (defaults match compose). Note: `/feed` and `/stats` are cached and not
   write-invalidated, so tests assert on populated/mapped state, not post-write deltas.
-- **deploy.yaml** (after CI succeeds on main, or manual): OIDC → EKS `kubectl apply` +
-  image rollout. Self-skips unless the `EKS_CLUSTER_NAME` repo variable is set.
-  Required repo variables: `AWS_ROLE_ARN`, `AWS_REGION`, `EKS_CLUSTER_NAME`.
+
+There is no cloud deploy workflow. The app targets a **local minikube / kind cluster**
+only. Images are built locally and loaded with `minikube image load`; there is no
+registry, ECR, or EKS deploy step.
 
 Integration caveats learned from the compose run (all fixed in-tree unless noted):
 - **Cross-service `/health` must not recurse.** Peer connectivity checks send an
@@ -106,13 +107,13 @@ Integration caveats learned from the compose run (all fixed in-tree unless noted
 - **Known simplifications** (not bugs — inherent to the OpenAPI contracts): the report's
   stored `severity` keeps the submitter value (the PATCH-status contract carries no
   severity field; the authoritative severity lives on the triage assignment), and
-  LocalStack presigned URLs embed the in-container `localstack:4566` host (EKS omits
-  `S3_ENDPOINT_URL`, yielding real S3 URLs).
+  LocalStack presigned URLs embed the in-container `localstack:4566` host (fine for the
+  local demo — the URL is reachable from inside the cluster / compose network).
 
 Kubernetes / minikube (validated end-to-end — full flow + ingress + HPA + S3):
-- **Local datastores**: `k8s/dev/datastores.yaml` provides in-cluster Postgres/Redis/
-  LocalStack (service names match `secret-local.yaml` hosts). NOT applied on EKS (managed
-  services there). The production `k8s/` manifests assume the data stores already exist.
+- **In-cluster datastores**: `k8s/dev/datastores.yaml` provides Postgres/Redis/
+  LocalStack (service names match `secret-local.yaml` hosts). Apply it as part of the
+  local bring-up — the app deployments connect to these by DNS name.
 - **Manifest bugs fixed** (were in the pre-existing manifests): `secret-local.yaml`
   `REDIS_URL` port `3792`→`6379`; ingress `rewrite-target` `/$1`→`/v1/$1` (services serve
   under `/v1`, so stripping it 404s); `postman.com/openapi-path: "/openapi.yaml"` moved
@@ -212,7 +213,7 @@ POSTGRES_PASSWORD
 POSTGRES_DB_REPORTS     reports
 S3_BUCKET_NAME          rpd311-attachments
 S3_REGION               us-east-1
-S3_ENDPOINT_URL         (LocalStack only — omit in EKS)
+S3_ENDPOINT_URL         (points at LocalStack, e.g. http://localstack:4566)
 AWS_ACCESS_KEY_ID       (LocalStack: "test")
 AWS_SECRET_ACCESS_KEY   (LocalStack: "test")
 SERVICE_TOKEN           (for validating triage/status callbacks)
@@ -558,7 +559,11 @@ Use whatever test framework is idiomatic for each stack:
 - No message queue — triage-service is called synchronously via HTTP from reports-service,
   not via Kafka/SQS. Keep it simple.
 - No Scorecards or Analytics tab features — these are explicitly out of scope per the
-  course outline this app supports.
+  course outline this app supports. **API Governance / spec linting is in scope**, though:
+  the demo intentionally connects the repo's OpenAPI specs and shows their governance
+  rule violations (a sub-par spec-quality result) as a teaching moment. Do NOT pre-fix
+  the specs to pass linting — the flagged violations are the point. (Spec-linting
+  compliance feeds the Scorecard, but the Scorecard tab itself stays out of scope.)
 
 ---
 
@@ -566,7 +571,8 @@ Use whatever test framework is idiomatic for each stack:
 
 - This app supports a Postman internal training course: "Connecting Services to API Catalog"
 - Lessons 6 and 7 demo the Postman Insights Agent and Cluster Watcher against this app
-  running on EKS. The demo environment requires a real K8s cluster — see `k8s/README.md`.
+  running on a local minikube / kind cluster. Both agents report outbound to Postman's
+  cloud, so no public ingress or cloud cluster is required — see `k8s/README.md`.
 - `triage-service` having no public ingress is intentional and load-bearing for the demo.
   Do not add an ingress rule for it.
 - The Raccoon City setting is a joke. The code should be professional.

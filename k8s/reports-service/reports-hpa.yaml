@@ -3,8 +3,7 @@
 # Outbreak events (sudden ZOMBIE_SIGHTING spikes) will trigger scale-out.
 #
 # Requires metrics-server installed in the cluster:
-#   minikube:  minikube addons enable metrics-server
-#   EKS:       kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+#   minikube addons enable metrics-server
 #
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler

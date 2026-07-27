@@ -41,10 +41,9 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: reports-service
-          # TODO: replace with your ECR image URI before deploying to EKS
-          # Format: <account>.dkr.ecr.<region>.amazonaws.com/rpd311/reports-service:<tag>
+          # Built locally and loaded into minikube: `minikube image load rpd311/reports-service:1.0.0`
           image: rpd311/reports-service:1.0.0
-          imagePullPolicy: IfNotPresent   # use Always for EKS with ECR
+          imagePullPolicy: IfNotPresent   # image is loaded into the node, not pulled from a registry
           ports:
             - name: http
               containerPort: 3001

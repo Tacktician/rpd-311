@@ -1,6 +1,6 @@
 """Pytest fixtures for the E2E suite.
 
-Assumes the stack is already up (docker compose, minikube, or EKS) and reachable
+Assumes the stack is already up (docker compose or minikube) and reachable
 at the configured service URLs. A session-scoped health gate fails fast with a
 clear message if it isn't.
 """

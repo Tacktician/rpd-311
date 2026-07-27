@@ -41,6 +41,6 @@ python generate_traffic.py            # forever, ~2s apart
 python generate_traffic.py -n 50 -d 1 # 50 reports, 1s apart
 ```
 
-Point it at any environment (local, minikube via port-forward, or EKS) by setting the
+Point it at any environment (local docker compose, or minikube via port-forward) by setting the
 `*_URL` vars. Requests are sent without a `traceparent` on purpose — the services
 originate one, which is what the Service Graph is built from.

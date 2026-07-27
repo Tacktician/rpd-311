@@ -2,9 +2,9 @@ import { S3Client, HeadBucketCommand, PutObjectCommand, GetObjectCommand } from 
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { config } from '../config.js';
 
-// forcePathStyle is required for LocalStack (path-style bucket addressing).
-// In EKS, S3_ENDPOINT_URL is unset and the SDK uses virtual-hosted-style against
-// real S3. Credentials come from the standard AWS_* env vars.
+// Attachments are stored in S3, served locally by LocalStack. forcePathStyle is
+// required for LocalStack (path-style bucket addressing); it's enabled whenever a
+// custom S3_ENDPOINT_URL is set. Credentials come from the AWS_* env vars (test/test).
 export const s3 = new S3Client({
   region: config.s3.region,
   endpoint: config.s3.endpoint,

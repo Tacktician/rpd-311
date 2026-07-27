@@ -1,8 +1,7 @@
-# dev/datastores.yaml — LOCAL DEVELOPMENT ONLY (minikube / kind)
+# dev/datastores.yaml — in-cluster datastores for the minikube / kind demo cluster.
 #
-# In-cluster Postgres, Redis, and LocalStack for running the full app on a local
-# cluster. In EKS these are managed services (RDS / ElastiCache / real S3) and
-# these manifests are NOT applied.
+# In-cluster Postgres, Redis, and LocalStack (S3) for running the full app on a
+# local cluster.
 #
 # Service names (postgres / redis / localstack) and ports match the hosts encoded
 # in k8s/base/secret-local.yaml, so the app deployments connect without changes.
