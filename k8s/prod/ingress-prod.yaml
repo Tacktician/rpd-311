@@ -1,0 +1,68 @@
+# ingress-prod.yaml — EKS (ingress-nginx, fronted by an AWS NLB).
+#
+# Same controller and same routing rules as ingress-local.yaml, deliberately: the
+# whole point of gating the EKS deploy on the minikube E2E suite is that the two
+# environments behave identically. Anything that differs here is a place where a
+# green minikube run can still break prod.
+#
+# Differences from the local manifest, and why:
+#   - No `host:` — a rule without a host matches any Host header, so the NLB's
+#     generated DNS name works without owning a domain or provisioning ACM.
+#   - No configuration-snippet — modern ingress-nginx blocks snippet annotations
+#     unless the controller is reconfigured with allow-snippet-annotations=true AND
+#     annotations-risk-level=Critical. nginx forwards traceparent/tracestate to
+#     upstreams by default anyway, so the snippet was never load-bearing.
+#
+# The controller itself is installed by the deploy job from the upstream ingress-nginx
+# AWS manifest, which creates the NLB. triage-service has NO rule here — it stays
+# ClusterIP-only, which is what makes it invisible to Postman API Catalog until the
+# Insights Agent or Cluster Watcher discovers it (Lessons 6 and 7).
+#
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: rpd311-ingress-prod
+  namespace: rpd311
+  labels:
+    app.kubernetes.io/part-of: rpd311
+    environment: prod
+  annotations:
+    # Preserve the /v1 prefix — the services mount their routes under /v1 (matching
+    # the OpenAPI `servers` base path), so the backend must receive /v1/reports…
+    nginx.ingress.kubernetes.io/rewrite-target: /v1/$1
+    nginx.ingress.kubernetes.io/use-regex: "true"
+spec:
+  ingressClassName: nginx
+  rules:
+    - http:
+        paths:
+          # reports-service — submit and manage reports
+          - path: /v1/(reports.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: reports-service
+                port:
+                  name: http
+          # status-service — public read endpoints
+          - path: /v1/(status.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: status-service
+                port:
+                  name: http
+          - path: /v1/(feed.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: status-service
+                port:
+                  name: http
+          - path: /v1/(stats.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: status-service
+                port:
+                  name: http

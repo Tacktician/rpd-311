@@ -28,6 +28,22 @@ services/status-service/status-service
 .localstack/
 pgdata/
 
+# --- Terraform ---
+# The main stack keeps state in S3 (see infra/terraform/versions.tf). The bootstrap
+# stack keeps LOCAL state because it owns the bucket the main stack's state lives in —
+# that file is account-specific and must not be committed.
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+crash.log
+# Real variable values stay local; terraform.tfvars.example is committed.
+terraform.tfvars
+*.auto.tfvars
+# .terraform.lock.hcl IS committed (pinned provider hashes for linux_amd64 + darwin_arm64).
+!.terraform.lock.hcl
+
 # --- Build output ---
 dist/
 build/

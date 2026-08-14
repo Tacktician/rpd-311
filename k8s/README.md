@@ -1,7 +1,18 @@
 # RPD 311 — Kubernetes Manifests
 
 Kubernetes manifests for the RPD 311 demo application.
-Three services, one namespace (`rpd311`), running on a local minikube / kind cluster.
+Three services, one namespace (`rpd311`), on two clusters:
+
+- **minikube / kind** — local testing. Everything below applies here.
+- **EKS (`rpd311-prod`)** — the deploy destination, provisioned by
+  [`infra/terraform/`](../infra/terraform/README.md) and rolled out by the `deploy-prod`
+  CI job on a merge to `main`.
+
+Both clusters run the same images, the same Deployments, Services, ConfigMap, HPA, and
+the same in-cluster datastores from `dev/datastores.yaml`. Only `prod/` differs — see
+[`prod/README.md`](prod/README.md) for the two files and why each exists. Keeping that
+list short is deliberate: `deploy-prod` is gated on the E2E suite passing here first, and
+every prod-only file is a place where a green local run can still break the deploy.
 
 ---
 
@@ -25,8 +36,11 @@ rpd311-k8s/
 ├── status-service/
 │   ├── status-deployment.yaml      — 2 replicas, lighter resource profile
 │   └── status-service.yaml         — ClusterIP (ingress handles external access)
-└── ingress/
-    └── ingress-local.yaml          — nginx ingress for minikube / kind
+├── ingress/
+│   └── ingress-local.yaml          — nginx ingress for minikube / kind
+└── prod/                           — EKS-only; everything above is shared
+    ├── ingress-prod.yaml           — nginx behind an AWS NLB, no host rule
+    └── create-secret.sh            — Secret from CI secrets (no committed placeholders)
 ```
 
 ---
@@ -115,6 +129,30 @@ curl -H 'Host: rpd311.local' http://localhost:18080/v1/status/health   # → sta
 kubectl run curl-test --image=curlimages/curl -it --rm -n rpd311 -- \
   curl http://triage-service.rpd311.svc.cluster.local/v1/health
 ```
+
+The `minikube-e2e` CI job runs exactly this bring-up on every push and PR, then drives
+the full `e2e/` suite against it and asserts the ingress routes — including that
+`/v1/triage` returns 404 through the ingress. If that job is green, this recipe works.
+
+---
+
+## Deploying to EKS (prod)
+
+Merging to `main` does it: `deploy-prod` runs `terraform apply`, pushes the three images
+to ECR tagged with the commit SHA, installs ingress-nginx (which provisions the NLB),
+applies base → secret → datastores → services → `prod/ingress-prod.yaml`, repoints the
+Deployments at the ECR tags, and re-runs the E2E suite against the live cluster.
+
+Full setup, cost breakdown, and troubleshooting:
+**[`infra/terraform/README.md`](../infra/terraform/README.md)**.
+
+Two things worth knowing before you go looking for them:
+
+- **The cluster does not always exist.** The **Teardown (prod)** workflow destroys it to
+  stop the ~$0.21/hour meter between demos. The next merge to `main` rebuilds it, which
+  takes 15–20 minutes for the control plane and node group.
+- **Prod has no domain.** `prod/ingress-prod.yaml` omits `host:`, so the NLB's generated
+  DNS name serves everything: `curl http://<nlb-dns-name>/v1/feed`. No ACM, no Route 53.
 
 ---
 

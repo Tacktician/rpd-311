@@ -1,0 +1,174 @@
+name: Teardown (prod)
+
+# Destroys the EKS stack so it stops costing money between demos, and writes the
+# emptied state back to the S3 backend so the next merge to main rebuilds cleanly.
+#
+# Manual only — there is no trigger that can fire this by accident, and it requires
+# typing the cluster name to confirm.
+#
+# Order matters. The NLB fronting ingress-nginx is created by Kubernetes, not by
+# terraform, so terraform does not know about it. Left in place it holds ENIs and a
+# security group in the VPC, and `terraform destroy` fails on subnet/VPC deletion
+# after having already deleted the cluster — the worst outcome, because you are then
+# paying for an orphaned load balancer that no workflow will clean up. So: delete the
+# controller Service, wait for AWS to actually remove the load balancer, then destroy.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type the cluster name to confirm (default: rpd311-prod)'
+        required: true
+        type: string
+      mode:
+        description: "plan = show what would be destroyed and stop; destroy = do it"
+        required: true
+        type: choice
+        default: plan
+        options:
+          - plan
+          - destroy
+
+concurrency:
+  # Shares the deploy job's concurrency group — a teardown must never interleave with
+  # a deploy applying the same terraform state.
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write # AWS OIDC
+
+jobs:
+  teardown:
+    if: ${{ vars.AWS_ROLE_ARN != '' && vars.TF_STATE_BUCKET != '' }}
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 45
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+      NAMESPACE: rpd311
+      EXPECTED_CLUSTER: rpd311-prod
+    steps:
+      - name: Check the confirmation input
+        run: |
+          if [ "${{ inputs.confirm }}" != "$EXPECTED_CLUSTER" ]; then
+            echo "Confirmation mismatch: got '${{ inputs.confirm }}', expected '$EXPECTED_CLUSTER'." >&2
+            echo "Nothing was touched." >&2
+            exit 1
+          fi
+          echo "Confirmed. Mode: ${{ inputs.mode }}"
+
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.15.8"
+          terraform_wrapper: false
+
+      - name: Terraform init
+        working-directory: infra/terraform
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="region=${AWS_REGION}"
+
+      - name: Plan the destroy
+        working-directory: infra/terraform
+        run: terraform plan -destroy -input=false -var "region=${AWS_REGION}"
+
+      - name: Stop here (plan mode)
+        if: ${{ inputs.mode == 'plan' }}
+        run: |
+          {
+            echo "### Teardown — plan only"
+            echo
+            echo "Nothing was destroyed. Re-run with mode \`destroy\` to proceed."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # --- everything below only runs in destroy mode ---
+
+      - name: Release the Kubernetes-managed load balancer
+        if: ${{ inputs.mode == 'destroy' }}
+        run: |
+          if ! aws eks describe-cluster --name "$EXPECTED_CLUSTER" --region "$AWS_REGION" >/dev/null 2>&1; then
+            echo "Cluster $EXPECTED_CLUSTER does not exist — no load balancer to release."
+            exit 0
+          fi
+
+          aws eks update-kubeconfig --name "$EXPECTED_CLUSTER" --region "$AWS_REGION"
+
+          # Deleting the Service is what tells the AWS cloud controller manager to
+          # delete the NLB. Deleting the namespace outright would do it too, but this
+          # is the narrower action and it is the one we can wait on.
+          kubectl -n ingress-nginx delete svc ingress-nginx-controller --ignore-not-found --wait=true
+
+          # `.terraform` from the init step persists across steps in the same job.
+          vpc_id="$(terraform -chdir=infra/terraform output -raw vpc_id 2>/dev/null || echo none)"
+          echo "Waiting for AWS to remove load balancers in ${vpc_id}…"
+          for _ in $(seq 1 60); do
+            count="$(aws elbv2 describe-load-balancers --region "$AWS_REGION" \
+                       --query "length(LoadBalancers[?VpcId=='${vpc_id}'])" \
+                       --output text 2>/dev/null || echo 0)"
+            [ "$count" = "0" ] && { echo "Load balancers released."; break; }
+            echo "  ${count} still present…"
+            sleep 10
+          done
+
+          kubectl delete namespace ingress-nginx --ignore-not-found --wait=false || true
+
+      - name: Terraform destroy
+        if: ${{ inputs.mode == 'destroy' }}
+        working-directory: infra/terraform
+        run: terraform destroy -input=false -auto-approve -var "region=${AWS_REGION}"
+
+      - name: Check for orphaned billable resources
+        if: ${{ inputs.mode == 'destroy' }}
+        run: |
+          # terraform destroy having succeeded means the VPC is gone, which means no
+          # load balancer or ENI could still be attached to it. This is a belt-and-braces
+          # sweep for anything tagged to the project that outlived the stack.
+          echo "Remaining EKS clusters:"
+          aws eks list-clusters --region "$AWS_REGION" --output text || true
+          echo "Load balancers still tagged rpd311:"
+          aws elbv2 describe-load-balancers --region "$AWS_REGION" \
+            --query "LoadBalancers[?contains(LoadBalancerName, 'rpd311')].LoadBalancerArn" --output text || true
+          echo "Unattached Elastic IPs (would bill hourly):"
+          aws ec2 describe-addresses --region "$AWS_REGION" \
+            --query "Addresses[?AssociationId==null].PublicIp" --output text || true
+
+      - name: Summarise
+        if: ${{ inputs.mode == 'destroy' && success() }}
+        run: |
+          {
+            echo "### Teardown complete"
+            echo
+            echo "Destroyed: EKS control plane, node group, VPC, and ECR repositories."
+            echo "Terraform state in \`${{ vars.TF_STATE_BUCKET }}\` has been updated — the"
+            echo "next push to \`main\` rebuilds the cluster from scratch (allow 15–20 minutes"
+            echo "for the control plane and node group)."
+            echo
+            echo "Kept (no ongoing cost): the state bucket and the GitHub Actions IAM role,"
+            echo "both owned by \`infra/terraform/bootstrap\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Warn on partial teardown
+        if: ${{ inputs.mode == 'destroy' && failure() }}
+        run: |
+          {
+            echo "### Teardown FAILED — check for billable leftovers"
+            echo
+            echo "A failed destroy commonly leaves the VPC behind because something"
+            echo "Kubernetes created still holds an ENI in it. Check the AWS console for:"
+            echo "- load balancers in the cluster VPC"
+            echo "- the EKS cluster itself"
+            echo "- orphaned EC2 instances from the node group"
+            echo
+            echo "Re-running this workflow in \`destroy\` mode is safe and usually finishes the job."
+          } >> "$GITHUB_STEP_SUMMARY"

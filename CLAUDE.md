@@ -27,8 +27,10 @@ rpd311/
 │   ├── triage-service/      Python / FastAPI    — port 3002  (internal only, no ingress)
 │   └── status-service/      Go                 — port 3003  (public read API)
 ├── k8s/                     Kubernetes manifests (complete — do not modify without reason)
-├── docker-compose.yml       To be created — base deps (Postgres, Redis, LocalStack)
-├── docker-compose.local.yml To be created — local dev overrides
+│   └── prod/                the only EKS-specific manifests (ingress + secret script)
+├── infra/terraform/         EKS prod cluster; bootstrap/ holds the tfstate bucket + OIDC role
+├── docker-compose.yml       Base deps (Postgres, Redis, LocalStack)
+├── docker-compose.local.yml Local dev overrides
 └── CLAUDE.md                This file
 ```
 
@@ -76,10 +78,18 @@ All three services are now implemented and verified end-to-end via docker-compos
 (build → submit → triage callback → acknowledge → public status/feed/stats/heatmap →
 S3 attachment upload). CI/CD is wired up in `.github/workflows/`:
 - **ci.yaml** (push/PR to main): per-service unit test + lint (Node `npm test`; Python
-  `pytest`; Go `gofmt`/`vet`/`test`/`build`), a build-only docker build of all three
-  images (validates the Dockerfiles; images are never pushed to a registry), and an
-  **`integration` job** that boots the full compose stack and runs the cross-service
-  E2E suite. No cloud credentials or secrets are required — CI is green out of the box.
+  `pytest`; Go `gofmt`/`vet`/`test`/`build`), a docker build of all three images (validates
+  the Dockerfiles and warms the layer cache `deploy-prod` reuses), an **`integration` job**
+  that boots the full compose stack and runs the cross-service E2E suite, a
+  **`minikube-e2e` job** that stands up a real cluster and runs the same suite against it,
+  and a **`deploy-prod` job** gated on all three.
+- **teardown.yaml** (`workflow_dispatch` only): `terraform destroy` of the prod cluster,
+  requiring the cluster name typed as confirmation.
+
+`deploy-prod` **self-skips unless the `AWS_ROLE_ARN` and `TF_STATE_BUCKET` repo variables
+are both set**, so CI stays green with no cloud credentials configured. Preserve that
+property in any CI change — it is what keeps the repo cloneable and testable by learners
+who have no AWS account.
 - **`e2e/`** — one HTTP harness, two jobs: `test_flow.py` (integration tests over the
   live reports→triage→status flow + real Postgres/Redis/LocalStack, run by CI) and
   `generate_traffic.py` (same flows on a loop, to feed the Insights Agent a connected
@@ -87,9 +97,31 @@ S3 attachment upload). CI/CD is wired up in `.github/workflows/`:
   env (defaults match compose). Note: `/feed` and `/stats` are cached and not
   write-invalidated, so tests assert on populated/mapped state, not post-write deltas.
 
-There is no cloud deploy workflow. The app targets a **local minikube / kind cluster**
-only. Images are built locally and loaded with `minikube image load`; there is no
-registry, ECR, or EKS deploy step.
+### Environments
+
+| | Where | Role |
+|---|---|---|
+| Local | docker-compose | Fast loop for service code. |
+| Local cluster | minikube / kind | **Rehearsal for prod.** Images built locally + `minikube image load`; no registry. |
+| Prod | EKS `rpd311-prod` | **Deploy destination.** `infra/terraform/`; images from ECR, tagged with the commit SHA. |
+
+The two clusters run the **same images, the same manifests, and the same in-cluster
+Postgres/Redis/LocalStack** (`k8s/dev/datastores.yaml`). Only `k8s/prod/` differs — two
+files: `ingress-prod.yaml` (no `host:` rule, so the NLB DNS name works without a domain
+or ACM; no `configuration-snippet`) and `create-secret.sh` (builds the Secret from CI
+secrets instead of the committed `changeme-service-token` in `base/secret-local.yaml`).
+
+That near-identity is load-bearing, not incidental: `deploy-prod` is gated on
+`minikube-e2e` passing the full E2E suite on a real cluster. **Every new prod-only file
+weakens the gate** — if a change needs one, prefer making the shared manifest work in both
+places. Prod deliberately has no RDS, ElastiCache, real S3, ACM, Route 53, ALB, IRSA, or
+External Secrets Operator; see `infra/terraform/README.md` for the reasoning and the
+~$0.21/hour cost breakdown.
+
+The prod cluster is **not always up** — the teardown workflow destroys it between demos
+and the next merge to `main` rebuilds it (15–20 min for the control plane and node group).
+Terraform state lives in S3 so a destroy leaves a clean slate. `infra/terraform/bootstrap/`
+(state bucket + GitHub OIDC role) keeps local state and is never torn down.
 
 Integration caveats learned from the compose run (all fixed in-tree unless noted):
 - **Cross-service `/health` must not recurse.** Peer connectivity checks send an
