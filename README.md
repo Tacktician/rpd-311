@@ -42,7 +42,8 @@ Cluster Watcher discovers it. This is the core demo moment for Lessons 6 and 7.
 rpd311/
 ├── .github/
 │   └── workflows/
-│       └── ci.yaml                         # lint, test, build images, integration tests
+│       ├── ci.yaml                         # test → build → minikube E2E gate → EKS deploy
+│       └── teardown.yaml                   # manual `terraform destroy` of the prod cluster
 │
 ├── services/
 │   ├── reports-service/
@@ -76,13 +77,47 @@ rpd311/
 │   ├── status-service/
 │   │   ├── status-deployment.yaml
 │   │   └── status-service.yaml
+│   ├── dev/
+│   │   └── datastores.yaml                 # in-cluster Postgres/Redis/LocalStack
+│   ├── prod/                               # the only EKS-specific manifests
+│   │   ├── ingress-prod.yaml               # nginx behind an AWS NLB, no host rule
+│   │   └── create-secret.sh                # Secret from CI secrets, not placeholders
 │   └── ingress/
 │       └── ingress-local.yaml              # nginx (minikube / kind)
+│
+├── infra/
+│   └── terraform/                          # EKS prod cluster (VPC, EKS, node group, ECR)
+│       └── bootstrap/                      # one-time: tfstate bucket + GitHub OIDC role
 │
 ├── docker-compose.yml                      # base services (Postgres, Redis, LocalStack)
 ├── docker-compose.local.yml               # local overrides (ports, volumes, hot-reload)
 └── README.md
 ```
+
+---
+
+## Environments
+
+| | Where | What it is |
+|---|---|---|
+| **Local** | docker-compose | Fastest loop for service code. `docker compose up`, no cluster. |
+| **Local cluster** | minikube / kind | Rehearsal for prod. Same images, same manifests, in-cluster datastores. |
+| **Prod** | EKS (`rpd311-prod`) | Deployment destination. Provisioned by `infra/terraform/`. |
+
+minikube and EKS run the **same images, the same manifests, and the same in-cluster
+Postgres / Redis / LocalStack**. Only two files differ (`k8s/prod/`), which is what makes
+the CI gate meaningful: `deploy-prod` will not run until the full E2E suite passes on a
+real local cluster.
+
+```
+unit tests ──┬── docker-build ─────┐
+             ├── integration ──────┤
+             └── minikube-e2e ─────┴── deploy-prod  (push to main only)
+```
+
+`deploy-prod` self-skips until the AWS repo variables are configured, so CI is green
+out of the box with no cloud credentials. See **[infra/terraform/README.md](infra/terraform/README.md)**
+for the one-time bootstrap, the cost breakdown (~$0.21/hour), and the teardown workflow.
 
 ---
 
@@ -94,6 +129,7 @@ rpd311/
 - Node.js 20+ (reports-service)
 - Python 3.12+ (triage-service)
 - Go 1.22+ (status-service)
+- Terraform 1.10+ and the AWS CLI — only for the EKS prod path
 
 ---
 
@@ -115,6 +151,7 @@ echo "$(minikube ip)  rpd311.local" | sudo tee -a /etc/hosts
 kubectl apply -f k8s/base/namespace.yaml
 kubectl apply -f k8s/base/configmap-common.yaml
 kubectl apply -f k8s/base/secret-local.yaml    # edit placeholders first
+kubectl apply -f k8s/dev/datastores.yaml       # in-cluster Postgres/Redis/LocalStack
 kubectl apply -f k8s/reports-service/
 kubectl apply -f k8s/triage-service/
 kubectl apply -f k8s/status-service/

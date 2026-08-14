@@ -142,11 +142,15 @@ rpd311/
 │       ├── service.yaml
 │       └── configmap.yaml
 ├── k8s/dev/
-│   └── datastores.yaml       ← In-cluster Postgres + Redis + LocalStack (S3) for minikube
+│   └── datastores.yaml       ← In-cluster Postgres + Redis + LocalStack (S3), both clusters
+├── k8s/prod/                 ← The only EKS-specific manifests (ingress + secret script)
+├── infra/terraform/          ← EKS prod cluster: VPC, EKS, node group, ECR
+│   └── bootstrap/            ← One-time: tfstate bucket + GitHub Actions OIDC role
 ├── docker-compose.yml        ← Local dev (LocalStack for S3, Postgres + Redis containers)
 ├── .github/
 │   └── workflows/
-│       └── ci.yaml           ← Lint, test, build images, integration tests
+│       ├── ci.yaml           ← Lint, test, build, minikube E2E gate, EKS deploy
+│       └── teardown.yaml     ← Manual terraform destroy of the prod cluster
 └── README.md
 ```
 
@@ -166,28 +170,41 @@ No full distributed tracing stack (Jaeger, Zipkin) required for the demo — jus
 
 ---
 
-## Infrastructure: local minikube / kind
+## Infrastructure: minikube (test) → EKS (prod)
 
-The app runs entirely on a local Kubernetes cluster — no cloud provider is required.
-This keeps the demo cloud-agnostic and focused on Postman API Catalog rather than any
-one deployment target.
+Two clusters, deliberately near-identical. minikube is where changes are proven; EKS is
+where a green `main` lands.
 
-| Component | Local equivalent |
-|---|---|
-| Postgres (reports, triage) | `postgres:15` container / in-cluster (`k8s/dev/datastores.yaml`) |
-| Redis (status cache) | `redis:7` container / in-cluster |
-| S3 (attachments) | LocalStack `s3` |
-| K8s | `minikube` or `kind` |
-| Ingress | nginx ingress controller (minikube addon) |
-| Container images | built locally, loaded with `minikube image load` (no registry) |
+| Component | minikube / kind (test) | EKS (prod) |
+|---|---|---|
+| Postgres (reports, triage) | in-cluster (`k8s/dev/datastores.yaml`) | **same** in-cluster manifest |
+| Redis (status cache) | in-cluster `redis:7` | **same** |
+| S3 (attachments) | LocalStack `s3` | **same** |
+| K8s | `minikube` / `kind` | EKS 1.32, 2× `t3.medium` managed node group |
+| Ingress | nginx (minikube addon) | nginx (upstream AWS manifest) behind an NLB |
+| Container images | built locally, `minikube image load` | ECR, tagged with the commit SHA |
+| Secrets | `k8s/base/secret-local.yaml` | `k8s/prod/create-secret.sh` from CI secrets |
 
-No AWS credentials are needed. `docker-compose up` brings all dependencies online for
-service development; `k8s/dev/datastores.yaml` provides the same datastores in-cluster
-for a full minikube run.
+Prod runs the same in-cluster datastores rather than RDS/ElastiCache/real S3. That is the
+point: the closer the two environments are, the more the CI gate means. `deploy-prod` does
+not run until `minikube-e2e` has driven the full `e2e/` suite against a real cluster.
 
-Lessons 6 and 7 (Insights Agent, Cluster Watcher) run against this local cluster —
-both agents report **outbound** to Postman's cloud, so no public ingress or managed
-cloud cluster is required.
+```
+unit tests ──┬── docker-build ─────┐
+             ├── integration ──────┤
+             └── minikube-e2e ─────┴── deploy-prod  (push to main only)
+```
+
+**No AWS account is needed to develop or test.** `docker compose up` brings dependencies
+online for service work, `k8s/dev/datastores.yaml` provides them in-cluster for a full
+minikube run, and `deploy-prod` self-skips until the AWS repo variables are configured.
+
+Prod costs ~$0.21/hour and is torn down between demos via the **Teardown (prod)** workflow;
+the next merge to `main` rebuilds it. See `infra/terraform/README.md`.
+
+Lessons 6 and 7 (Insights Agent, Cluster Watcher) run on **either** cluster — both agents
+report **outbound** to Postman's cloud, so no public ingress or managed cloud cluster is
+required. minikube remains the cheaper choice for recording.
 
 ---
 
@@ -235,18 +252,25 @@ kubectl create namespace rpd311
 | **5 — status-service** | Implement read endpoints; Redis cache layer; aggregate from reports + triage | Local | — |
 | **6 — K8s local** | Write all manifests; deploy to minikube; verify service-to-service calls work in cluster | minikube / kind | — |
 | **7 — CI pipeline** | GitHub Actions: lint → test → build images → integration tests | GitHub | — |
-| **8 — Insights Agent (L6)** | Install the Insights Agent in the cluster; drive traffic; verify discovery of all three services (incl. triage) | minikube / kind | Lesson 6 |
-| **9 — Cluster Watcher (L7)** | Install the Cluster Watcher; verify deployment metadata (commit/branch/namespace) | minikube / kind | Lesson 7 |
-| **10 — Demo recording** | Record Insights Agent (L6) and Cluster Watcher (L7) walkthroughs | minikube / kind | Lessons 6–7 |
+| **8 — Prod deploy path** | Terraform EKS + ECR; minikube E2E job as the prod gate; manual teardown workflow | GitHub + AWS | — |
+| **9 — Insights Agent (L6)** | Install the Insights Agent in the cluster; drive traffic; verify discovery of all three services (incl. triage) | minikube / kind | Lesson 6 |
+| **10 — Cluster Watcher (L7)** | Install the Cluster Watcher; verify deployment metadata (commit/branch/namespace) | minikube / kind | Lesson 7 |
+| **11 — Demo recording** | Record Insights Agent (L6) and Cluster Watcher (L7) walkthroughs | minikube / kind | Lessons 6–7 |
 
 ---
 
 ## Blockers
 
-**Discovery-demo manifests (Phases 8–10):** The Insights Agent DaemonSet and Cluster
+**Discovery-demo manifests (Phases 9–11):** The Insights Agent DaemonSet and Cluster
 Watcher CRD/controller manifests are not yet in the repo (the Lesson 6/7 sections in
 `k8s/README.md` reference them as placeholders). These need to be added and validated
 against the minikube cluster before demo recording. The agents require a `POSTMAN_API_KEY`.
+
+**Prod path is unverified end-to-end (Phase 8):** the terraform stack validates and the
+workflows are wired, but no cluster has been applied yet — the bootstrap stack has to run
+once against a real AWS account and the repo variables set before `deploy-prod` does
+anything but self-skip. Budget 15–20 minutes for the first apply. See
+`infra/terraform/README.md`.
 
 **triage-service routing confirmation:** The routing logic above is draft. Confirm department queue names and escalation rules with the course author before finalizing the OpenAPI spec — the enum values and routing table appear in lesson prose.
 

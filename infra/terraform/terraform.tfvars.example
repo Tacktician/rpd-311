@@ -1,0 +1,25 @@
+# Copy to terraform.tfvars for local plans/applies. CI passes nothing — it relies on
+# the defaults below plus the AWS_REGION repo variable, so keep the defaults workable.
+#
+#   cp terraform.tfvars.example terraform.tfvars
+
+region      = "us-east-1"
+project     = "rpd311"
+environment = "prod"
+
+kubernetes_version = "1.32"
+
+# Two t3.medium nodes hold the three services plus in-cluster Postgres, Redis,
+# LocalStack, and the ingress-nginx controller.
+node_instance_types = ["t3.medium"]
+node_desired_size   = 2
+node_min_size       = 2
+node_max_size       = 4
+
+# Your own IAM user/role, so `aws eks update-kubeconfig` works from your laptop.
+# Without an entry here only the GitHub Actions role can reach the cluster.
+# admin_principal_arns = ["arn:aws:iam::123456789012:user/james.tacker"]
+
+# Narrow the Kubernetes API endpoint to known networks if you never need CI to reach
+# it (note: the deploy job does, and GitHub runner IPs are not stable).
+# cluster_endpoint_public_access_cidrs = ["203.0.113.4/32"]

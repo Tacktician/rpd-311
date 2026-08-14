@@ -27,8 +27,10 @@ rpd311/
 │   ├── triage-service/      Python / FastAPI    — port 3002  (internal only, no ingress)
 │   └── status-service/      Go                 — port 3003  (public read API)
 ├── k8s/                     Kubernetes manifests (complete — do not modify without reason)
-├── docker-compose.yml       To be created — base deps (Postgres, Redis, LocalStack)
-├── docker-compose.local.yml To be created — local dev overrides
+│   └── prod/                the only EKS-specific manifests (ingress + secret script)
+├── infra/terraform/         EKS prod cluster; bootstrap/ holds the tfstate bucket + OIDC role
+├── docker-compose.yml       Base deps (Postgres, Redis, LocalStack)
+├── docker-compose.local.yml Local dev overrides
 └── CLAUDE.md                This file
 ```
 
@@ -76,10 +78,18 @@ All three services are now implemented and verified end-to-end via docker-compos
 (build → submit → triage callback → acknowledge → public status/feed/stats/heatmap →
 S3 attachment upload). CI/CD is wired up in `.github/workflows/`:
 - **ci.yaml** (push/PR to main): per-service unit test + lint (Node `npm test`; Python
-  `pytest`; Go `gofmt`/`vet`/`test`/`build`), a build-only docker build of all three
-  images (validates the Dockerfiles; images are never pushed to a registry), and an
-  **`integration` job** that boots the full compose stack and runs the cross-service
-  E2E suite. No cloud credentials or secrets are required — CI is green out of the box.
+  `pytest`; Go `gofmt`/`vet`/`test`/`build`), a docker build of all three images (validates
+  the Dockerfiles and warms the layer cache `deploy-prod` reuses), an **`integration` job**
+  that boots the full compose stack and runs the cross-service E2E suite, a
+  **`minikube-e2e` job** that stands up a real cluster and runs the same suite against it,
+  and a **`deploy-prod` job** gated on all three.
+- **teardown.yaml** (`workflow_dispatch` only): `terraform destroy` of the prod cluster,
+  requiring the cluster name typed as confirmation.
+
+`deploy-prod` **self-skips unless the `AWS_ROLE_ARN` and `TF_STATE_BUCKET` repo variables
+are both set**, so CI stays green with no cloud credentials configured. Preserve that
+property in any CI change — it is what keeps the repo cloneable and testable by learners
+who have no AWS account.
 - **`e2e/`** — one HTTP harness, two jobs: `test_flow.py` (integration tests over the
   live reports→triage→status flow + real Postgres/Redis/LocalStack, run by CI) and
   `generate_traffic.py` (same flows on a loop, to feed the Insights Agent a connected
@@ -87,9 +97,32 @@ S3 attachment upload). CI/CD is wired up in `.github/workflows/`:
   env (defaults match compose). Note: `/feed` and `/stats` are cached and not
   write-invalidated, so tests assert on populated/mapped state, not post-write deltas.
 
-There is no cloud deploy workflow. The app targets a **local minikube / kind cluster**
-only. Images are built locally and loaded with `minikube image load`; there is no
-registry, ECR, or EKS deploy step.
+### Environments
+
+| | Where | Role |
+|---|---|---|
+| Local | docker-compose | Fast loop for service code. |
+| Local cluster | minikube / kind | **Rehearsal for prod.** Images built locally + `minikube image load`; no registry. |
+| Prod | EKS `rpd311-prod` | **Deploy destination.** `infra/terraform/`; images from ECR, tagged with the commit SHA. |
+
+The two clusters run the **same images, the same manifests, and the same in-cluster
+Postgres/Redis/LocalStack** (`k8s/dev/datastores.yaml`). Only `k8s/prod/` differs — two
+files: `ingress-prod.yaml` (identical to `ingress-local.yaml` except it omits the `host:`
+rule, so the NLB DNS name works without a domain or ACM) and `create-secret.sh` (builds
+the Secret from CI secrets instead of the committed `changeme-service-token` in
+`base/secret-local.yaml`).
+
+That near-identity is load-bearing, not incidental: `deploy-prod` is gated on
+`minikube-e2e` passing the full E2E suite on a real cluster. **Every new prod-only file
+weakens the gate** — if a change needs one, prefer making the shared manifest work in both
+places. Prod deliberately has no RDS, ElastiCache, real S3, ACM, Route 53, ALB, IRSA, or
+External Secrets Operator; see `infra/terraform/README.md` for the reasoning and the
+~$0.21/hour cost breakdown.
+
+The prod cluster is **not always up** — the teardown workflow destroys it between demos
+and the next merge to `main` rebuilds it (15–20 min for the control plane and node group).
+Terraform state lives in S3 so a destroy leaves a clean slate. `infra/terraform/bootstrap/`
+(state bucket + GitHub OIDC role) keeps local state and is never torn down.
 
 Integration caveats learned from the compose run (all fixed in-tree unless noted):
 - **Cross-service `/health` must not recurse.** Peer connectivity checks send an
@@ -122,11 +155,19 @@ Kubernetes / minikube (validated end-to-end — full flow + ingress + HPA + S3):
   `CREATE EXTENSION/TYPE IF NOT EXISTS` from multiple replicas races on the pg catalog
   unique index and crashes a pod on first boot. Fixed with a Postgres advisory lock around
   migration (reports `db/migrate.js`, triage `db.py`).
-- **ingress-nginx snippets**: the traceparent `configuration-snippet` requires the
-  controller configmap to set BOTH `allow-snippet-annotations: "true"` and
-  `annotations-risk-level: "Critical"` (modern ingress-nginx blocks snippets by default).
-  Alternatively drop the snippet — nginx forwards `traceparent`/`tracestate` to upstreams
-  by default anyway.
+- **ingress-nginx snippets — removed, do not re-add.** Modern ingress-nginx (including the
+  version the minikube `ingress` addon installs) *rejects* `configuration-snippet` at the
+  admission webhook: "Snippet directives are disabled by the Ingress administrator". This
+  failed the `minikube-e2e` job. Both ingresses now omit it. Re-enabling would need BOTH
+  `allow-snippet-annotations: "true"` and `annotations-risk-level: "Critical"` in the
+  controller ConfigMap — pointless ceremony, since nginx forwards
+  `traceparent`/`tracestate` to upstreams by default and the snippet never did any work.
+- **Ingress class** goes in `spec.ingressClassName`, not the deprecated
+  `kubernetes.io/ingress.class` annotation (which warns on every apply).
+- **Pin the minikube Kubernetes version.** `minikube start` unpinned tracks the newest
+  upstream release (it pulled 1.35.1 in CI), so the gate would test a control plane three
+  minors ahead of prod. CI pins `v1.32.0` to match `infra/terraform/variables.tf`
+  `kubernetes_version`. Bump both together or the gate stops being faithful.
 - **Local run recipe**: build `rpd311/<svc>:1.0.0` + `minikube image load` (deployments use
   `imagePullPolicy: IfNotPresent`); apply base → `k8s/dev/datastores.yaml` → services →
   `ingress-local.yaml`. On the macOS docker driver the ingress isn't directly routable —
