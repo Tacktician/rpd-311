@@ -164,6 +164,10 @@ Kubernetes / minikube (validated end-to-end — full flow + ingress + HPA + S3):
   `traceparent`/`tracestate` to upstreams by default and the snippet never did any work.
 - **Ingress class** goes in `spec.ingressClassName`, not the deprecated
   `kubernetes.io/ingress.class` annotation (which warns on every apply).
+- **Pin the minikube Kubernetes version.** `minikube start` unpinned tracks the newest
+  upstream release (it pulled 1.35.1 in CI), so the gate would test a control plane three
+  minors ahead of prod. CI pins `v1.32.0` to match `infra/terraform/variables.tf`
+  `kubernetes_version`. Bump both together or the gate stops being faithful.
 - **Local run recipe**: build `rpd311/<svc>:1.0.0` + `minikube image load` (deployments use
   `imagePullPolicy: IfNotPresent`); apply base → `k8s/dev/datastores.yaml` → services →
   `ingress-local.yaml`. On the macOS docker driver the ingress isn't directly routable —

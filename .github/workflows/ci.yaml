@@ -176,10 +176,16 @@ jobs:
           # The stack needs ~1.7 CPU of requests once minikube's own control plane pods
           # are counted, so a 2-core runner is the tight case.
           #
+          # Pinned to the same minor as prod (infra/terraform/variables.tf
+          # kubernetes_version = "1.32"). minikube's default tracks the newest upstream
+          # release — it pulled 1.35.1 unpinned — which makes the gate test a control
+          # plane three minors ahead of what EKS actually runs. Bump both together.
+          #
           # metrics-server backs the reports-service HPA — same reason the EKS stack
           # installs the metrics-server addon (infra/terraform/eks.tf).
           minikube start \
             --driver=docker \
+            --kubernetes-version=v1.32.0 \
             --cpus=max \
             --memory=5000mb \
             --addons=ingress,metrics-server
