@@ -605,12 +605,23 @@ Use whatever test framework is idiomatic for each stack:
   rule violations (a sub-par spec-quality result) as a teaching moment. Do NOT pre-fix
   the specs to pass linting — the flagged violations are the point. (Spec-linting
   compliance feeds the Scorecard, but the Scorecard tab itself stays out of scope.)
+  **This now has a second consumer:** `docs/CAPSTONE.md` instructs students that
+  governance findings are expected and must not gate their pipeline. Cleaning up the
+  specs would silently break that exercise as well as Lesson 3.
 
 ---
 
 ## Useful context
 
 - This app supports a Postman internal training course: "Connecting Services to API Catalog"
+- **`docs/CAPSTONE.md`** — the Level 3 capstone that uses this repo as a project template:
+  students fork it and write a headless `golden-path.sh` that provisions a Postman
+  workspace, catalogs all three specs, generates and runs collections, and deploys the
+  Insights Agent to minikube. Two things to keep in mind when changing this repo:
+  the capstone cites specific files and line numbers (config defaults, spec `servers`
+  entries, the `/v1` prefix, token-protected endpoints), and it depends on
+  `e2e/generate_traffic.py` and the intentional spec-governance violations. If you change
+  any of those, check `docs/CAPSTONE.md` for a stale reference.
 - Lessons 6 and 7 demo the Postman Insights Agent and Cluster Watcher against this app
   running on a local minikube / kind cluster. Both agents report outbound to Postman's
   cloud, so no public ingress or cloud cluster is required — see `k8s/README.md`.

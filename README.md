@@ -206,6 +206,27 @@ See `k8s/README.md` for installation steps.
 
 ---
 
+## Capstone project
+
+This repo doubles as the project template for the **Level 3 capstone**: build a headless
+`golden-path.sh` that programmatically provisions a Postman workspace, catalogs all three
+OpenAPI specs, generates and runs collections through staged quality gates, and deploys the
+Insights Agent to minikube — illuminating the Dev, Test, and Production tabs of API Catalog
+with no manual steps.
+
+**→ [`docs/CAPSTONE.md`](docs/CAPSTONE.md)**
+
+Start with its Prerequisites and Step 0 sections. Step 0 gets the application stack green
+before any Postman work begins, which is where most of the debugging time otherwise goes.
+
+Two notes for anyone attempting it:
+- **Fork to your personal GitHub account** (not an org — orgs often gate third-party app access).
+- The EKS deploy path (`infra/terraform/`, the `deploy-prod` job) is **out of scope** for the
+  capstone. `deploy-prod` skips itself unless the AWS repo variables are set, so forking costs
+  you nothing.
+
+---
+
 ## W3C tracing
 
 All three services propagate `traceparent` headers on outbound calls.
