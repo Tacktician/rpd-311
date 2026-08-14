@@ -101,16 +101,7 @@ cd e2e && pip install -r requirements.txt && pytest -q
 
 `pytest -q` green means submit → triage → callback → acknowledge → public status/feed/stats all work. **Only then** proceed to Step 1.
 
-> ⚠️ **If the ingress apply is rejected**, you will see this:
-> ```
-> Error from server (BadRequest): error when creating "k8s/ingress/ingress-local.yaml":
-> admission webhook "validate.nginx.ingress.kubernetes.io" denied the request:
-> nginx.ingress.kubernetes.io/configuration-snippet annotation cannot be used.
-> Snippet directives are disabled by the Ingress administrator
-> ```
-> Modern ingress-nginx — including the version the minikube `ingress` addon installs — refuses snippet annotations. **Fix: delete the `nginx.ingress.kubernetes.io/configuration-snippet` block from `k8s/ingress/ingress-local.yaml`** and re-apply. It is safe to remove and changes nothing you need: nginx forwards `traceparent`/`tracestate` to upstreams by default, and more importantly each service *originates* its own trace when the inbound request has none (see `deriveOutboundTraceparent` in `services/reports-service/src/middleware/tracing.js`). Your Service Graph in Step 6 does not depend on the ingress passing that header. Newer copies of this repo already have the annotation removed.
->
-> While you are in that file: if `kubectl apply` warns that `kubernetes.io/ingress.class` is deprecated, replace the annotation with `ingressClassName: nginx` under `spec:`.
+> ⚠️ **Working from an older fork?** If the ingress apply is rejected because snippet annotations are disabled, delete the `nginx.ingress.kubernetes.io/configuration-snippet` block from `k8s/ingress/ingress-local.yaml` and re-apply — it is redundant, and nothing in this capstone depends on it.
 
 Note that the images use `imagePullPolicy: IfNotPresent` with local tags and there is no registry — building inside `minikube docker-env` (or `minikube image load`) is how they reach the node.
 
