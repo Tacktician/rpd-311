@@ -8,7 +8,7 @@ Whenever a project team initializes a new feature branch or service, your script
 
 **Estimated effort:** 8–15 hours, assuming the prerequisites below are already in place. Budget a full session for prerequisites alone the first time.
 
-**Scope:** minikube only. If your copy of this repo contains a cloud deploy path — terraform under `infra/`, a prod deploy CI job, a teardown workflow — **all of it is out of scope.** It requires AWS credentials you are not expected to have and stays inert without them, so forking costs you nothing and you can ignore it entirely. Note the terminology collision: "Production tab" below means the Postman API Catalog tab, *not* a cloud environment.
+**Scope:** minikube only. This repo also contains a terraform-provisioned EKS deploy path — `infra/terraform/`, the `deploy-prod` CI job, and the `teardown.yaml` workflow — and **all of it is out of scope.** `deploy-prod` skips itself unless the AWS repository variables are configured, which they will not be on your fork, so forking costs you nothing and you can ignore that whole path. Note the terminology collision: "Production tab" below means the Postman API Catalog tab, *not* the EKS environment.
 
 ---
 
