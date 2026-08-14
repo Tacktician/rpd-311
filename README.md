@@ -221,8 +221,8 @@ before any Postman work begins, which is where most of the debugging time otherw
 
 Two notes for anyone attempting it:
 - **Fork to your personal GitHub account** (not an org — orgs often gate third-party app access).
-- The EKS deploy path in this repo is **out of scope** for the capstone and self-skips without
-  AWS credentials, so forking costs you nothing.
+- Any cloud deploy path in this repo (terraform, a prod deploy CI job) is **out of scope** for
+  the capstone. It needs AWS credentials and stays inert without them, so forking costs nothing.
 
 ---
 

@@ -8,7 +8,7 @@ Whenever a project team initializes a new feature branch or service, your script
 
 **Estimated effort:** 8–15 hours, assuming the prerequisites below are already in place. Budget a full session for prerequisites alone the first time.
 
-**Scope:** minikube only. This repo also contains a terraform-provisioned EKS deploy path (`infra/terraform/`, the `deploy-prod` CI job, and `teardown.yaml`) — **all of that is out of scope.** It self-skips without AWS credentials configured, so forking this repo costs you nothing and you can ignore it entirely. Note the terminology collision: "Production tab" below means the Postman API Catalog tab, *not* the EKS environment.
+**Scope:** minikube only. If your copy of this repo contains a cloud deploy path — terraform under `infra/`, a prod deploy CI job, a teardown workflow — **all of it is out of scope.** It requires AWS credentials you are not expected to have and stays inert without them, so forking costs you nothing and you can ignore it entirely. Note the terminology collision: "Production tab" below means the Postman API Catalog tab, *not* a cloud environment.
 
 ---
 
@@ -100,6 +100,17 @@ cd e2e && pip install -r requirements.txt && pytest -q
 ```
 
 `pytest -q` green means submit → triage → callback → acknowledge → public status/feed/stats all work. **Only then** proceed to Step 1.
+
+> ⚠️ **If the ingress apply is rejected**, you will see this:
+> ```
+> Error from server (BadRequest): error when creating "k8s/ingress/ingress-local.yaml":
+> admission webhook "validate.nginx.ingress.kubernetes.io" denied the request:
+> nginx.ingress.kubernetes.io/configuration-snippet annotation cannot be used.
+> Snippet directives are disabled by the Ingress administrator
+> ```
+> Modern ingress-nginx — including the version the minikube `ingress` addon installs — refuses snippet annotations. **Fix: delete the `nginx.ingress.kubernetes.io/configuration-snippet` block from `k8s/ingress/ingress-local.yaml`** and re-apply. It is safe to remove and changes nothing you need: nginx forwards `traceparent`/`tracestate` to upstreams by default, and more importantly each service *originates* its own trace when the inbound request has none (see `deriveOutboundTraceparent` in `services/reports-service/src/middleware/tracing.js`). Your Service Graph in Step 6 does not depend on the ingress passing that header. Newer copies of this repo already have the annotation removed.
+>
+> While you are in that file: if `kubectl apply` warns that `kubernetes.io/ingress.class` is deprecated, replace the annotation with `ingressClassName: nginx` under `spec:`.
 
 Note that the images use `imagePullPolicy: IfNotPresent` with local tags and there is no registry — building inside `minikube docker-env` (or `minikube image load`) is how they reach the node.
 
