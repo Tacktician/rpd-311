@@ -107,9 +107,10 @@ who have no AWS account.
 
 The two clusters run the **same images, the same manifests, and the same in-cluster
 Postgres/Redis/LocalStack** (`k8s/dev/datastores.yaml`). Only `k8s/prod/` differs — two
-files: `ingress-prod.yaml` (no `host:` rule, so the NLB DNS name works without a domain
-or ACM; no `configuration-snippet`) and `create-secret.sh` (builds the Secret from CI
-secrets instead of the committed `changeme-service-token` in `base/secret-local.yaml`).
+files: `ingress-prod.yaml` (identical to `ingress-local.yaml` except it omits the `host:`
+rule, so the NLB DNS name works without a domain or ACM) and `create-secret.sh` (builds
+the Secret from CI secrets instead of the committed `changeme-service-token` in
+`base/secret-local.yaml`).
 
 That near-identity is load-bearing, not incidental: `deploy-prod` is gated on
 `minikube-e2e` passing the full E2E suite on a real cluster. **Every new prod-only file
@@ -154,11 +155,15 @@ Kubernetes / minikube (validated end-to-end — full flow + ingress + HPA + S3):
   `CREATE EXTENSION/TYPE IF NOT EXISTS` from multiple replicas races on the pg catalog
   unique index and crashes a pod on first boot. Fixed with a Postgres advisory lock around
   migration (reports `db/migrate.js`, triage `db.py`).
-- **ingress-nginx snippets**: the traceparent `configuration-snippet` requires the
-  controller configmap to set BOTH `allow-snippet-annotations: "true"` and
-  `annotations-risk-level: "Critical"` (modern ingress-nginx blocks snippets by default).
-  Alternatively drop the snippet — nginx forwards `traceparent`/`tracestate` to upstreams
-  by default anyway.
+- **ingress-nginx snippets — removed, do not re-add.** Modern ingress-nginx (including the
+  version the minikube `ingress` addon installs) *rejects* `configuration-snippet` at the
+  admission webhook: "Snippet directives are disabled by the Ingress administrator". This
+  failed the `minikube-e2e` job. Both ingresses now omit it. Re-enabling would need BOTH
+  `allow-snippet-annotations: "true"` and `annotations-risk-level: "Critical"` in the
+  controller ConfigMap — pointless ceremony, since nginx forwards
+  `traceparent`/`tracestate` to upstreams by default and the snippet never did any work.
+- **Ingress class** goes in `spec.ingressClassName`, not the deprecated
+  `kubernetes.io/ingress.class` annotation (which warns on every apply).
 - **Local run recipe**: build `rpd311/<svc>:1.0.0` + `minikube image load` (deployments use
   `imagePullPolicy: IfNotPresent`); apply base → `k8s/dev/datastores.yaml` → services →
   `ingress-local.yaml`. On the macOS docker driver the ingress isn't directly routable —

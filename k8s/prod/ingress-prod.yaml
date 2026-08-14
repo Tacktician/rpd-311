@@ -5,13 +5,15 @@
 # environments behave identically. Anything that differs here is a place where a
 # green minikube run can still break prod.
 #
-# Differences from the local manifest, and why:
+# The ONLY difference from the local manifest:
 #   - No `host:` — a rule without a host matches any Host header, so the NLB's
 #     generated DNS name works without owning a domain or provisioning ACM.
-#   - No configuration-snippet — modern ingress-nginx blocks snippet annotations
-#     unless the controller is reconfigured with allow-snippet-annotations=true AND
-#     annotations-risk-level=Critical. nginx forwards traceparent/tracestate to
-#     upstreams by default anyway, so the snippet was never load-bearing.
+#
+# Everything else — ingressClassName, both annotations, all four path rules — is
+# byte-identical to ingress-local.yaml. Keep it that way. (The local manifest used to
+# carry a traceparent configuration-snippet that this one omitted; that snippet is now
+# gone from both, because modern ingress-nginx rejects snippet annotations at the
+# admission webhook and nginx forwards traceparent/tracestate to upstreams regardless.)
 #
 # The controller itself is installed by the deploy job from the upstream ingress-nginx
 # AWS manifest, which creates the NLB. triage-service has NO rule here — it stays

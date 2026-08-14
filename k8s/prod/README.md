@@ -6,7 +6,7 @@ and they live here.
 
 | File | Why prod needs its own |
 |---|---|
-| `ingress-prod.yaml` | No `host:` rule, so the NLB's generated DNS name works without a domain or ACM certificate. No `configuration-snippet`, which modern ingress-nginx blocks by default and which was never load-bearing (nginx forwards `traceparent` anyway). |
+| `ingress-prod.yaml` | No `host:` rule, so the NLB's generated DNS name works without a domain or ACM certificate. That is the **only** difference from `ingress-local.yaml` — ingressClassName, both annotations, and all four path rules are identical. Keep them that way. |
 | `create-secret.sh` | `k8s/base/secret-local.yaml` ships a committed `changeme-service-token`. Prod builds the Secret from repository secrets and refuses to run if `SERVICE_TOKEN` is unset or still the placeholder. |
 
 Keeping this set as small as possible is the point. Every file here is a place where a

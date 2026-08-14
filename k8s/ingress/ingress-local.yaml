@@ -22,6 +22,18 @@
 #
 # triage-service has NO ingress rule — ClusterIP only, internal access only.
 #
+# NO configuration-snippet annotation. Modern ingress-nginx — including the version the
+# minikube `ingress` addon installs — rejects snippet annotations outright:
+#
+#   admission webhook "validate.nginx.ingress.kubernetes.io" denied the request:
+#   nginx.ingress.kubernetes.io/configuration-snippet annotation cannot be used.
+#   Snippet directives are disabled by the Ingress administrator
+#
+# Re-enabling them needs BOTH `allow-snippet-annotations: "true"` and
+# `annotations-risk-level: "Critical"` in the controller ConfigMap, which is a lot of
+# ceremony for nothing: nginx already forwards traceparent/tracestate to upstreams by
+# default, so the snippet never did any work. Matches k8s/prod/ingress-prod.yaml.
+#
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -31,17 +43,14 @@ metadata:
     app.kubernetes.io/part-of: rpd311
     environment: local
   annotations:
-    kubernetes.io/ingress.class: "nginx"
     # Preserve the /v1 prefix — the services mount their routes under /v1 (matching
     # the OpenAPI `servers` base path), so the backend must receive /v1/reports…,
     # not /reports…. (Was /$1, which stripped /v1 and produced 404s.)
     nginx.ingress.kubernetes.io/rewrite-target: /v1/$1
     nginx.ingress.kubernetes.io/use-regex: "true"
-    # Pass traceparent header through — required for Postman Service Graph
-    nginx.ingress.kubernetes.io/configuration-snippet: |
-      proxy_set_header traceparent $http_traceparent;
-      proxy_set_header tracestate  $http_tracestate;
 spec:
+  # Was the kubernetes.io/ingress.class annotation, which is deprecated and warns on apply.
+  ingressClassName: nginx
   rules:
     - host: rpd311.local
       http:
