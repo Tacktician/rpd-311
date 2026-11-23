@@ -214,7 +214,7 @@ OpenAPI specs, generates and runs collections through staged quality gates, and 
 Insights Agent to minikube — illuminating the Dev, Test, and Production tabs of API Catalog
 with no manual steps.
 
-**→ [`docs/CAPSTONE.md`](docs/CAPSTONE.md)**
+**→ [`docs/api-catalog/CAPSTONE.md`](docs/api-catalog/CAPSTONE.md)**
 
 Start with its Prerequisites and Step 0 sections. Step 0 gets the application stack green
 before any Postman work begins, which is where most of the debugging time otherwise goes.
@@ -224,6 +224,18 @@ Two notes for anyone attempting it:
 - The EKS deploy path (`infra/terraform/`, the `deploy-prod` job) is **out of scope** for the
   capstone. `deploy-prod` skips itself unless the AWS repo variables are set, so forking costs
   you nothing.
+
+
+---
+
+## Passport lab (stretch goal)
+
+A second, independent lab uses this cluster to try **Postman Passport**: keep a Postman API key
+out of your shell and call `api.getpostman.com` through a Passport Proxy. A `Makefile` handles
+minikube, the sample app, keys, Vault and the Helm install, so you work in the Passport app and
+CLI instead of `kubectl`.
+
+**→ [`docs/passport/PASSPORT.md`](docs/passport/PASSPORT.md)**
 
 ---
 

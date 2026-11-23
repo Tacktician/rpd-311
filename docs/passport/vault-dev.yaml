@@ -1,0 +1,43 @@
+# vault-dev.yaml: a throwaway HashiCorp Vault in dev mode for the Passport lab (PASSPORT.md).
+#
+# DEV MODE IS FOR EVALUATION ONLY. It keeps data in memory, so everything stored in it is gone
+# when the pod restarts (for example after `minikube start`). It uses a fixed root token.
+# Never use this for anything real.
+#
+# `make vault` applies this file. In dev mode Vault mounts a KV v2 store at secret/.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vault
+  namespace: passport
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: vault }
+  template:
+    metadata:
+      labels: { app: vault }
+    spec:
+      containers:
+        - name: vault
+          image: hashicorp/vault
+          args: ["server", "-dev"]
+          env:
+            - { name: VAULT_DEV_ROOT_TOKEN_ID, value: lab-root-token }
+            - { name: VAULT_DEV_LISTEN_ADDRESS, value: "0.0.0.0:8200" }
+          ports:
+            - containerPort: 8200
+          securityContext:
+            capabilities:
+              add: ["IPC_LOCK"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vault
+  namespace: passport
+spec:
+  selector: { app: vault }
+  ports:
+    - port: 8200
+      targetPort: 8200

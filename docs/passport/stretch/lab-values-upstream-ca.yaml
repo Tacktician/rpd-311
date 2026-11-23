@@ -1,0 +1,17 @@
+# Stretch overlay for the Passport chart: trust the self-signed rpd311.local certificate.
+# `make stretch-up` creates the ConfigMap and `make proxy` adds this file when it exists in
+# $(WORKDIR). Without it the proxy answers 502 "x509: certificate signed by unknown authority".
+#
+# SSL_CERT_DIR (not SSL_CERT_FILE): in Go, setting only the directory leaves the default
+# system bundle in place, so public hosts such as api.getpostman.com still verify.
+extraEnv:
+  - name: SSL_CERT_DIR
+    value: /etc/rpd311-upstream-ca
+extraVolumes:
+  - name: rpd311-upstream-ca
+    configMap:
+      name: rpd311-upstream-ca
+extraVolumeMounts:
+  - name: rpd311-upstream-ca
+    mountPath: /etc/rpd311-upstream-ca
+    readOnly: true

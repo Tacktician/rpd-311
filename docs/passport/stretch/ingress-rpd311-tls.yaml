@@ -1,0 +1,59 @@
+# Stretch lab overlay: the same routes as k8s/ingress/ingress-local.yaml plus a TLS block for
+# rpd311.local, so the Passport proxy can call the sample app over HTTPS. `make stretch-up`
+# applies it. Same name as the original, so `kubectl apply` updates it in place.
+#
+# To go back: kubectl apply -f k8s/ingress/ingress-local.yaml, then remove the tls block:
+#   kubectl -n rpd311 patch ingress rpd311-ingress-local --type=json -p='[{"op":"remove","path":"/spec/tls"}]'
+#
+# ssl-redirect is off so plain-HTTP checks keep working. Without it, ingress-nginx answers HTTP
+# with a 308 redirect once a tls block exists.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: rpd311-ingress-local
+  namespace: rpd311
+  labels:
+    app.kubernetes.io/part-of: rpd311
+    environment: local
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /v1/$1
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+spec:
+  ingressClassName: nginx
+  tls:
+    - secretName: rpd311-local-tls
+      hosts:
+        - rpd311.local
+  rules:
+    - host: rpd311.local
+      http:
+        paths:
+          - path: /v1/(reports.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: reports-service
+                port:
+                  name: http
+          - path: /v1/(status.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: status-service
+                port:
+                  name: http
+          - path: /v1/(feed.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: status-service
+                port:
+                  name: http
+          - path: /v1/(stats.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: status-service
+                port:
+                  name: http

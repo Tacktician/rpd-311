@@ -1,0 +1,39 @@
+# lab-values.yaml: Helm overrides for the Passport lab (PASSPORT.md), reached by port-forward.
+#
+# Helm merges this file over the chart's default values (chart 0.6.0), so you do not edit the
+# long values.yaml that `helm show values` prints. `make proxy` copies this file to
+# $(WORKDIR)/lab-values.yaml with <your-organization-id> replaced by $PASSPORT_ORG_ID.
+#
+# Everything not listed here keeps the chart default.
+namespace:
+  create: false
+
+image:
+  repository: ociregistry.usepassport.ai/passport/passport-proxy
+  tag: latest
+  pullSecrets:
+    - name: passport-registry
+
+proxy:
+  dataplaneCertSANs: "localhost"
+  managementHost: "localhost:8081"     # plain HTTP on the management port; works with `passport setup` for local development
+
+bundle:
+  # Use the Organization ID (org_...) from Org Settings > Overview. The chart's own comment
+  # says "Postman team ID", but the Organization ID is what issued certificates in testing.
+  allowedTeamIds: "<your-organization-id>"
+
+keys:
+  mode: existingSecret
+  existingSecret:
+    name: passport-keys
+
+vault:
+  source: hashicorp
+  hashicorp:
+    address: "http://vault.passport.svc.cluster.local:8200"
+    mount: secret/data
+    tokenSecretRef: { name: vault-token, key: token }
+
+audit:
+  sink: stdout
